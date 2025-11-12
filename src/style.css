@@ -15,21 +15,25 @@ body {
   min-height: 100vh;
 }
 
-#app,
-.layout {
+#app {
   width: 100%;
   height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
 
 .layout {
+  flex: 1;
   display: flex;
   overflow: hidden;
+  min-height: 0;
 }
 
 .viewport {
   flex: 1;
   position: relative;
   background: #050608;
+  min-height: 0;
 }
 
 .viewport canvas {
@@ -72,7 +76,8 @@ body {
 
 .panel input,
 .panel select,
-.panel button {
+.panel button,
+.timeline-bar button {
   border-radius: 4px;
   border: 1px solid #2a3147;
   background: #141b2b;
@@ -81,13 +86,16 @@ body {
   font-size: 0.85rem;
 }
 
-.panel button {
+.panel button,
+.timeline-bar button {
   cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 
 .panel button:hover,
-.panel button.active {
+.panel button.active,
+.timeline-bar button:hover,
+.timeline-bar button.active {
   border-color: #3ea6ff;
   background: #1c2538;
 }
@@ -190,4 +198,107 @@ input[type="range"] {
 .ease-status {
   font-size: 0.75rem;
   color: #b6c5dd;
+}
+
+.timeline-bar {
+  background: #0b0f17;
+  border-top: 1px solid #1d2230;
+  padding: 12px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.timeline-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.timeline-buttons {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.timeline-frame-readout {
+  font-size: 0.85rem;
+  color: #c7ddff;
+  min-width: 120px;
+  text-align: right;
+}
+
+.timeline-track {
+  position: relative;
+  height: 48px;
+  border: 1px solid #1f2535;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #121a2b 0%, #0c111d 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+  user-select: none;
+  overflow: hidden;
+  touch-action: none;
+}
+
+.timeline-track::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.timeline-keyframes {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.timeline-frame-lines {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.timeline-frame-line {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  transform: translateX(-0.5px);
+}
+
+.timeline-frame-line.major {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.timeline-keyframe {
+  position: absolute;
+  bottom: 6px;
+  width: 0;
+  height: 0;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-bottom: 10px solid #f5a94c;
+  transform: translateX(-50%);
+}
+
+.timeline-keyframe.active {
+  border-bottom-color: #ffffff;
+}
+
+.timeline-cursor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #3ea6ff;
+  transform: translateX(-50%);
+  pointer-events: none;
 }

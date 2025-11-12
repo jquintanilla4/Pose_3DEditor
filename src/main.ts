@@ -55,6 +55,13 @@ type VideoRuntime = {
   height: number;
 };
 
+type TimelineBarController = {
+  setFrame: (frame: number, frameCount: number) => void;
+  setMarkers: (frames: number[], frameCount: number) => void;
+  setFrameLines: (frameCount: number) => void;
+  setPlaybackState: (payload: { playing: boolean; loop: boolean }) => void;
+};
+
 type UIController = {
   refreshJointList: () => void;
   updateSelection: () => void;
@@ -290,6 +297,52 @@ const videoAnchor = new THREE.Group();
 scene.add(videoAnchor);
 videoAnchor.add(videoPlaneMesh);
 overlay.update(state.output);
+let timelineMarkersDirty = true;
+let timelineMarkerCache: number[] = [];
+let timelineMarkerFrameCount = -1;
+
+function markTimelineDirty() {
+  timelineMarkersDirty = true;
+}
+
+function getTimelineMarkerCache(): number[] {
+  if (!timelineMarkersDirty) {
+    return timelineMarkerCache;
+  }
+  timelineMarkerCache = collectAllKeyframes();
+  timelineMarkersDirty = false;
+  return timelineMarkerCache;
+}
+
+function collectAllKeyframes(): number[] {
+  const frames = new Set<number>();
+  const addKeys = (keys?: Key<any>[]) => {
+    if (!keys) return;
+    keys.forEach((key) => frames.add(key.f));
+  };
+  const addVec3 = (track?: KeyTrackVec3) => {
+    if (!track) return;
+    addKeys(track.keysX);
+    addKeys(track.keysY);
+    addKeys(track.keysZ);
+  };
+  const anim = state.anim;
+  addVec3(anim.rigRoot.pos);
+  addVec3(anim.rigRoot.scale);
+  addKeys(anim.rigRoot.rot.keys);
+  Object.values(anim.groupScales).forEach(addVec3);
+  Object.values(anim.jointPositions).forEach(addVec3);
+  addVec3(anim.camera.pos);
+  addVec3(anim.camera.target);
+  addKeys(anim.camera.fov.keys);
+  const plane = anim.videoPlane;
+  addVec3(plane.transform.pos);
+  addVec3(plane.transform.scale);
+  addKeys(plane.transform.rot.keys);
+  addKeys(plane.timeOffset.keys);
+  addKeys(plane.lockToCamera.keys);
+  return Array.from(frames).sort((a, b) => a - b);
+}
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
@@ -303,7 +356,8 @@ const depthBrushState = {
 const depthBrushDirection = new THREE.Vector3();
 const depthBrushOffset = new THREE.Vector3();
 
-const ui = buildPanel(panel);
+const timelineUI = createTimelineBar(app);
+const ui = buildPanel(panel, timelineUI);
 ui.refreshJointList();
 ui.updateTimeline();
 ui.updateOutputControls();
@@ -582,6 +636,7 @@ function commitSelectionKey() {
     setVec3Key(state.anim.videoPlane.transform.scale, frame, { x: scale.x, y: scale.y, z: scale.z });
     setQuatKey(state.anim.videoPlane.transform.rot, frame, [rot.x, rot.y, rot.z, rot.w]);
   }
+  markTimelineDirty();
   ui.showStatus(`Key stored @ frame ${frame}`);
   selectionDirty = false;
   requestPoseUpdate();
@@ -695,6 +750,7 @@ function preserveWorldReparent(obj: THREE.Object3D, target: THREE.Object3D) {
 function requestPoseUpdate() {
   updateRig(currentFrame);
   updateVideoPlane(currentFrame);
+  ui.updateTimeline();
 }
 
 function updateFrame(frame: number) {
@@ -834,6 +890,10 @@ function setCurrentFrame(value: number) {
   updateFrame(value);
 }
 
+function stepFrame(delta: number) {
+  setCurrentFrame(currentFrame + delta);
+}
+
 function setOutputSize(partial: Partial<{ width: number; height: number; pixelAspect: number; renderScale: number; overscanPct: number }>) {
   Object.assign(state.output, partial);
   overlay.update(state.output);
@@ -860,6 +920,7 @@ function setGroupScaleValue(groupId: string, value: Vec3): Vec3 {
   };
   const track = getGroupScaleTrack(state, groupId);
   setVec3Key(track, currentFrame, snapped);
+  markTimelineDirty();
   requestPoseUpdate();
   return snapped;
 }
@@ -869,6 +930,7 @@ function switchProfile(id: RigProfileId) {
   stopPlayback();
   const newState = createEditorState(id);
   state = newState;
+  markTimelineDirty();
   disposeRigVisual(rigVisual);
   rigVisual = buildRig(getProfile(id));
   centroids = computeGroupCentroids(getProfile(id));
@@ -995,6 +1057,7 @@ function loadFromFile(file: File) {
         },
         autoKey: data?.autoKey ?? base.autoKey
       };
+      markTimelineDirty();
       stopPlayback();
       disposeRigVisual(rigVisual);
       rigVisual = buildRig(getProfile(state.rigProfileId));
@@ -1012,7 +1075,7 @@ function loadFromFile(file: File) {
     .catch(() => ui.showStatus("Failed to load file"));
 }
 
-function buildPanel(container: HTMLElement): UIController {
+function buildPanel(container: HTMLElement, timelineBar: TimelineBarController): UIController {
   container.innerHTML = `
     <section>
       <header>Rig</header>
@@ -1231,11 +1294,15 @@ function buildPanel(container: HTMLElement): UIController {
   lockVideo.addEventListener("change", () => {
     setBoolKey(state.anim.videoPlane.lockToCamera, currentFrame, lockVideo.checked);
     updateVideoPlane(currentFrame);
+    markTimelineDirty();
+    ui.updateTimeline();
   });
   const videoOffset = container.querySelector<HTMLInputElement>('[data-ctrl="video-offset"]')!;
   videoOffset.addEventListener("change", () => {
     setFloatKey(state.anim.videoPlane.timeOffset, currentFrame, parseFloat(videoOffset.value));
     updateVideoPlane(currentFrame);
+    markTimelineDirty();
+    ui.updateTimeline();
   });
 
   const cameraFovInput = container.querySelector<HTMLInputElement>('[data-ctrl="camera-fov"]')!;
@@ -1252,6 +1319,8 @@ function buildPanel(container: HTMLElement): UIController {
     setVec3Key(state.anim.camera.pos, currentFrame, { x: camera.position.x, y: camera.position.y, z: camera.position.z });
     setVec3Key(state.anim.camera.target, currentFrame, { x: controls.target.x, y: controls.target.y, z: controls.target.z });
     setFloatKey(state.anim.camera.fov, currentFrame, camera.fov);
+    markTimelineDirty();
+    ui.updateTimeline();
     ui.showStatus(`Camera keyed @ frame ${currentFrame}`);
   });
 
@@ -1422,6 +1491,14 @@ function buildPanel(container: HTMLElement): UIController {
       frameSlider.max = String(state.timeline.frameCount);
       frameSlider.value = String(currentFrame);
       frameNumber.value = String(currentFrame);
+      const frameCount = state.timeline.frameCount;
+      const shouldRefreshMarkers = timelineMarkersDirty || timelineMarkerFrameCount !== frameCount;
+      if (shouldRefreshMarkers) {
+        timelineBar.setFrameLines(frameCount);
+        timelineBar.setMarkers(getTimelineMarkerCache(), frameCount);
+        timelineMarkerFrameCount = frameCount;
+      }
+      timelineBar.setFrame(currentFrame, frameCount);
     },
     updateOutputControls: () => {
       outWidth.value = String(state.output.width);
@@ -1449,6 +1526,7 @@ function buildPanel(container: HTMLElement): UIController {
       playbackButton.textContent = isPlaying ? "Pause" : "Play";
       playbackButton.classList.toggle("active", isPlaying);
       loopButton.classList.toggle("active", loopPlayback);
+      timelineBar.setPlaybackState({ playing: isPlaying, loop: loopPlayback });
     },
     updateEaseControls: () => {
       refreshEaseDisplay();
@@ -1470,6 +1548,143 @@ function buildPanel(container: HTMLElement): UIController {
           statusLabel.textContent = "Ready.";
         }
       }, 3000);
+    }
+  };
+}
+
+function createTimelineBar(container: HTMLElement): TimelineBarController {
+  const bar = document.createElement("div");
+  bar.className = "timeline-bar";
+  bar.innerHTML = `
+    <div class="timeline-controls">
+      <div class="timeline-buttons">
+        <button type="button" data-timeline="prev" title="Step back one frame">Prev</button>
+        <button type="button" data-timeline="play">Play</button>
+        <button type="button" data-timeline="pause">Pause</button>
+        <button type="button" data-timeline="next" title="Step forward one frame">Next</button>
+        <button type="button" data-timeline="loop">Loop</button>
+      </div>
+      <div class="timeline-frame-readout" data-timeline="frame">Frame 0 / 0</div>
+    </div>
+  `;
+  const track = document.createElement("div");
+  track.className = "timeline-track";
+  track.dataset.timeline = "track";
+  const lineLayer = document.createElement("div");
+  lineLayer.className = "timeline-frame-lines";
+  lineLayer.dataset.timeline = "frame-lines";
+  const keyLayer = document.createElement("div");
+  keyLayer.className = "timeline-keyframes";
+  keyLayer.dataset.timeline = "keys";
+  const cursor = document.createElement("div");
+  cursor.className = "timeline-cursor";
+  cursor.dataset.timeline = "cursor";
+  track.append(lineLayer, keyLayer, cursor);
+  bar.appendChild(track);
+  container.appendChild(bar);
+
+  const playBtn = bar.querySelector<HTMLButtonElement>('[data-timeline="play"]')!;
+  const pauseBtn = bar.querySelector<HTMLButtonElement>('[data-timeline="pause"]')!;
+  const prevBtn = bar.querySelector<HTMLButtonElement>('[data-timeline="prev"]')!;
+  const nextBtn = bar.querySelector<HTMLButtonElement>('[data-timeline="next"]')!;
+  const loopBtn = bar.querySelector<HTMLButtonElement>('[data-timeline="loop"]')!;
+  const frameLabel = bar.querySelector<HTMLDivElement>('[data-timeline="frame"]')!;
+
+  playBtn.addEventListener("click", startPlayback);
+  pauseBtn.addEventListener("click", stopPlayback);
+  loopBtn.addEventListener("click", toggleLoopPlayback);
+  prevBtn.addEventListener("click", () => {
+    stopPlayback();
+    stepFrame(-1);
+  });
+  nextBtn.addEventListener("click", () => {
+    stopPlayback();
+    stepFrame(1);
+  });
+
+  const scrubToEvent = (event: PointerEvent) => {
+    const rect = track.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const ratio = THREE.MathUtils.clamp((event.clientX - rect.left) / rect.width, 0, 1);
+    const frameCount = state.timeline.frameCount;
+    const frame = Math.round(ratio * frameCount);
+    setCurrentFrame(frame);
+  };
+
+  const handlePointerMove = (event: PointerEvent) => {
+    scrubToEvent(event);
+  };
+  const handlePointerUp = () => {
+    window.removeEventListener("pointermove", handlePointerMove);
+    window.removeEventListener("pointerup", handlePointerUp);
+    window.removeEventListener("pointercancel", handlePointerUp);
+  };
+
+  track.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    stopPlayback();
+    scrubToEvent(event);
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
+  });
+
+  return {
+    setFrame: (frame, frameCount) => {
+      const ratio = frameCount > 0 ? THREE.MathUtils.clamp(frame / frameCount, 0, 1) : 0;
+      cursor.style.left = `${ratio * 100}%`;
+      const displayFrame = Math.round(frame);
+      frameLabel.textContent = `Frame ${displayFrame} / ${frameCount}`;
+      keyLayer.querySelectorAll<HTMLDivElement>(".timeline-keyframe").forEach((marker) => {
+        const markerFrame = Number(marker.dataset.frame ?? 0);
+        marker.classList.toggle("active", Math.round(markerFrame) === displayFrame);
+      });
+    },
+    setFrameLines: (frameCount) => {
+      lineLayer.innerHTML = "";
+      const denom = Math.max(frameCount, 1);
+      const maxLines = 2000;
+      const step = frameCount > maxLines ? Math.ceil(frameCount / maxLines) : 1;
+      const frag = document.createDocumentFragment();
+      for (let frame = 0; frame <= frameCount; frame += step) {
+        const line = document.createElement("div");
+        line.className = "timeline-frame-line";
+        if (frame % 10 === 0) {
+          line.classList.add("major");
+        }
+        const percent = denom > 0 ? (frame / denom) * 100 : 0;
+        line.style.left = `${percent}%`;
+        frag.appendChild(line);
+      }
+      if ((frameCount % step) !== 0) {
+        const line = document.createElement("div");
+        line.className = "timeline-frame-line major";
+        line.style.left = "100%";
+        frag.appendChild(line);
+      }
+      lineLayer.appendChild(frag);
+    },
+    setMarkers: (frames, frameCount) => {
+      keyLayer.innerHTML = "";
+      if (!frames.length) return;
+      const frag = document.createDocumentFragment();
+      const denom = Math.max(frameCount, 1);
+      frames.forEach((frame) => {
+        const marker = document.createElement("div");
+        marker.className = "timeline-keyframe";
+        marker.dataset.frame = String(frame);
+        const clamped = THREE.MathUtils.clamp(frame, 0, frameCount);
+        const percent = denom > 0 ? (clamped / denom) * 100 : 0;
+        marker.style.left = `${percent}%`;
+        frag.appendChild(marker);
+      });
+      keyLayer.appendChild(frag);
+    },
+    setPlaybackState: ({ playing, loop }) => {
+      playBtn.classList.toggle("active", playing);
+      pauseBtn.classList.toggle("active", !playing);
+      loopBtn.classList.toggle("active", loop);
     }
   };
 }
