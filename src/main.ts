@@ -65,6 +65,7 @@ type TimelineBarController = {
 type UIController = {
   refreshJointList: () => void;
   updateSelection: () => void;
+  updateTransformMode: () => void;
   updateTimeline: () => void;
   updateOutputControls: () => void;
   updateGuideControls: () => void;
@@ -104,7 +105,14 @@ controls.target.set(0, 1.1, 0);
 const transformControls = new TransformControls(camera, renderer.domElement);
 const transformControlsToggle = transformControls as TransformControls & { enabled: boolean };
 transformControls.setSize(0.75);
-scene.add(transformControls as unknown as THREE.Object3D);
+scene.add(transformControls.getHelper());
+
+const jointRotationHelper = new THREE.Object3D();
+scene.add(jointRotationHelper);
+const jointRotationPrevQuat = new THREE.Quaternion();
+const identityQuat = new THREE.Quaternion();
+const jointRotationDelta = new THREE.Quaternion();
+const jointRotationPrevInverse = new THREE.Quaternion();
 
 const ambient = new THREE.AmbientLight(0xffffff, 0.5);
 scene.add(ambient);
@@ -289,9 +297,13 @@ let playbackCursor = 0;
 let lastPlaybackTime = 0;
 let cameraPreviewEnabled = true;
 let selectionDirty = false;
+const dirtyJointIds = new Set<string>();
 let videoRuntime: VideoRuntime | null = null;
 let rigVisual = buildRig(getProfile(state.rigProfileId));
 let centroids = computeGroupCentroids(getProfile(state.rigProfileId));
+let jointChildren = buildJointChildren(getProfile(state.rigProfileId));
+let jointDescendantsCache: Record<string, string[]> = {};
+let currentRotationDescendants: string[] = [];
 const videoPlaneMesh = createVideoPlaneMesh();
 const videoAnchor = new THREE.Group();
 scene.add(videoAnchor);
@@ -300,6 +312,7 @@ overlay.update(state.output);
 let timelineMarkersDirty = true;
 let timelineMarkerCache: number[] = [];
 let timelineMarkerFrameCount = -1;
+let ui: UIController;
 
 function markTimelineDirty() {
   timelineMarkersDirty = true;
@@ -344,8 +357,61 @@ function collectAllKeyframes(): number[] {
   return Array.from(frames).sort((a, b) => a - b);
 }
 
+function buildJointChildren(profile: RigProfile): Record<string, string[]> {
+  const children: Record<string, string[]> = {};
+  profile.joints.forEach((joint) => {
+    children[joint.id] = [];
+  });
+  profile.bones.forEach(([parent, child]) => {
+    if (!children[parent]) {
+      children[parent] = [];
+    }
+    if (!children[child]) {
+      children[child] = [];
+    }
+    children[parent].push(child);
+  });
+  return children;
+}
+
+function getJointDescendants(jointId: string): string[] {
+  if (jointDescendantsCache[jointId]) {
+    return jointDescendantsCache[jointId];
+  }
+  const result: string[] = [];
+  const stack: string[] = [...(jointChildren[jointId] ?? [])];
+  const visited = new Set<string>();
+  while (stack.length) {
+    const child = stack.pop()!;
+    if (visited.has(child)) continue;
+    visited.add(child);
+    result.push(child);
+    const nextChildren = jointChildren[child];
+    if (nextChildren) {
+      stack.push(...nextChildren);
+    }
+  }
+  jointDescendantsCache[jointId] = result;
+  return result;
+}
+
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
+const jointRotationTemp = new THREE.Vector3();
+const jointRotationPivot = new THREE.Vector3();
+
+const isTextInputTarget = (target: EventTarget | null): boolean => {
+  if (!target) return false;
+  if (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement
+  ) {
+    return true;
+  }
+  return target instanceof HTMLElement && target.isContentEditable;
+};
+
 const depthBrushState = {
   active: false,
   pointerId: -1,
@@ -357,7 +423,7 @@ const depthBrushDirection = new THREE.Vector3();
 const depthBrushOffset = new THREE.Vector3();
 
 const timelineUI = createTimelineBar(app);
-const ui = buildPanel(panel, timelineUI);
+ui = buildPanel(panel, timelineUI);
 ui.refreshJointList();
 ui.updateTimeline();
 ui.updateOutputControls();
@@ -386,7 +452,22 @@ transformControls.addEventListener("dragging-changed", (event: TransformControls
 });
 
 transformControls.addEventListener("objectChange", () => {
-  selectionDirty = true;
+  if (!selection) return;
+  let changed = false;
+  if (selection.kind === "joint") {
+    if (transformMode === "rotate") {
+      changed = applyJointRotationDelta();
+    } else {
+      dirtyJointIds.add(selection.id);
+      selectionDirty = true;
+      refreshBoneGeometryFromMeshes();
+      changed = true;
+    }
+  } else {
+    selectionDirty = true;
+    changed = true;
+  }
+  if (!changed) return;
   if (state.autoKey) {
     commitSelectionKey();
     selectionDirty = false;
@@ -395,13 +476,26 @@ transformControls.addEventListener("objectChange", () => {
   }
 });
 
-const orbitKeyHandler = (event: KeyboardEvent) => {
-  if (event.key === "g") {
+const viewportKeyHandler = (event: KeyboardEvent) => {
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  if (isTextInputTarget(event.target)) return;
+  const key = event.key.toLowerCase();
+  if (key === "g") {
     selection = { kind: "rigRoot" };
     updateSelection();
+    return;
+  }
+  if (key === "w") {
+    event.preventDefault();
+    setTransformMode("translate");
+    return;
+  }
+  if (key === "e") {
+    event.preventDefault();
+    setTransformMode("rotate");
   }
 };
-window.addEventListener("keydown", orbitKeyHandler);
+window.addEventListener("keydown", viewportKeyHandler);
 
 function handleResize() {
   const width = viewportHost.clientWidth;
@@ -544,6 +638,7 @@ function updateDepthBrush(event: PointerEvent) {
   const delta = (depthBrushState.startY - event.clientY) * DEPTH_BRUSH_SPEED;
   depthBrushOffset.copy(depthBrushDirection).multiplyScalar(delta);
   mesh.position.copy(depthBrushState.startPos).add(depthBrushOffset);
+  dirtyJointIds.add(depthBrushState.jointId);
   selectionDirty = true;
   if (state.autoKey) {
     commitSelectionKey();
@@ -551,6 +646,8 @@ function updateDepthBrush(event: PointerEvent) {
   } else {
     ui.showStatus("Transform pending — click Key Selected to store");
   }
+  refreshBoneGeometryFromMeshes();
+  syncJointRotationHelper();
 }
 
 function endDepthBrush(event?: PointerEvent) {
@@ -565,15 +662,27 @@ function endDepthBrush(event?: PointerEvent) {
   depthBrushState.startPos.set(0, 0, 0);
   controls.enabled = true;
   transformControlsToggle.enabled = true;
+  syncJointRotationHelper();
 }
 
-function setTransformMode(mode: "translate" | "rotate" | "scale") {
-  transformMode = mode;
-  transformControls.setMode(mode);
-  if (selection?.kind === "joint" && mode !== "translate") {
-    transformControls.setMode("translate");
-    transformMode = "translate";
+function setTransformMode(mode: "translate" | "rotate" | "scale"): boolean {
+  if (selection?.kind === "joint" && mode === "scale") {
+    ui.showStatus("Joint scaling isn't supported — use move or rotate.");
+    return false;
   }
+  if (transformMode === mode) return true;
+  transformMode = mode;
+  if (selection) {
+    if (selection.kind === "joint") {
+      attachJointTransform(selection.id);
+    } else {
+      transformControls.setMode(mode);
+    }
+  }
+  if (ui) {
+    ui.updateTransformMode();
+  }
+  return true;
 }
 
 function selectRigRoot() {
@@ -588,6 +697,7 @@ function selectVideoPlane() {
 
 function updateSelection() {
   selectionDirty = false;
+  dirtyJointIds.clear();
   transformControls.detach();
   for (const [jointId, mat] of Object.entries(rigVisual.jointMaterials)) {
     mat.color.set(selection?.kind === "joint" && selection.id === jointId ? 0xffc857 : 0x4cc9f0);
@@ -597,11 +707,7 @@ function updateSelection() {
     return;
   }
   if (selection.kind === "joint") {
-    const mesh = rigVisual.joints[selection.id];
-    if (mesh) {
-      transformControls.attach(mesh);
-      transformControls.setMode("translate");
-    }
+    attachJointTransform(selection.id);
   } else if (selection.kind === "rigRoot") {
     transformControls.attach(rigVisual.group);
     transformControls.setMode(transformMode);
@@ -609,18 +715,99 @@ function updateSelection() {
     transformControls.attach(videoPlaneMesh);
     transformControls.setMode(transformMode);
   }
+  ui.updateTransformMode();
   ui.updateSelection();
   ui.updateEaseControls();
+}
+
+function attachJointTransform(jointId: string) {
+  const mesh = rigVisual.joints[jointId];
+  if (!mesh) return;
+  if (transformMode === "rotate") {
+    prepareJointRotationHelper(mesh, jointId);
+    transformControls.attach(jointRotationHelper);
+    transformControls.setMode("rotate");
+  } else {
+    transformControls.attach(mesh);
+    transformControls.setMode("translate");
+    currentRotationDescendants = [];
+  }
+}
+
+function prepareJointRotationHelper(mesh: THREE.Mesh, jointId: string) {
+  jointRotationHelper.position.copy(mesh.position);
+  jointRotationHelper.quaternion.identity();
+  jointRotationHelper.rotation.set(0, 0, 0);
+  jointRotationPrevQuat.identity();
+  currentRotationDescendants = getJointDescendants(jointId);
+}
+
+function syncJointRotationHelper() {
+  if (!selection || selection.kind !== "joint") return;
+  if (transformMode !== "rotate") return;
+  const mesh = rigVisual.joints[selection.id];
+  if (!mesh) return;
+  jointRotationHelper.position.copy(mesh.position);
+}
+
+function refreshBoneGeometryFromMeshes() {
+  const attr = rigVisual.boneGeometry.getAttribute("position") as THREE.BufferAttribute;
+  let idx = 0;
+  for (const [a, b] of rigVisual.bones) {
+    const meshA = rigVisual.joints[a];
+    const meshB = rigVisual.joints[b];
+    if (!meshA || !meshB) continue;
+    attr.setXYZ(idx, meshA.position.x, meshA.position.y, meshA.position.z);
+    idx += 1;
+    attr.setXYZ(idx, meshB.position.x, meshB.position.y, meshB.position.z);
+    idx += 1;
+  }
+  attr.needsUpdate = true;
+}
+
+function applyJointRotationDelta(): boolean {
+  if (!selection || selection.kind !== "joint") return false;
+  if (transformMode !== "rotate") return false;
+  const mesh = rigVisual.joints[selection.id];
+  if (!mesh) return false;
+  const currentQuat = jointRotationHelper.quaternion;
+  const prev = jointRotationPrevQuat;
+  jointRotationPrevInverse.copy(prev).invert();
+  jointRotationDelta.copy(currentQuat).multiply(jointRotationPrevInverse);
+  if (jointRotationDelta.angleTo(identityQuat) < 1e-4) {
+    return false;
+  }
+  prev.copy(currentQuat);
+  jointRotationPivot.copy(mesh.position);
+  let changed = false;
+  for (const jointId of currentRotationDescendants) {
+    const child = rigVisual.joints[jointId];
+    if (!child) continue;
+    jointRotationTemp.copy(child.position).sub(jointRotationPivot);
+    jointRotationTemp.applyQuaternion(jointRotationDelta);
+    child.position.copy(jointRotationPivot).add(jointRotationTemp);
+    dirtyJointIds.add(jointId);
+    changed = true;
+  }
+  if (changed) {
+    selectionDirty = true;
+    refreshBoneGeometryFromMeshes();
+  }
+  return changed;
 }
 
 function commitSelectionKey() {
   if (!selection) return;
   const frame = currentFrame;
   if (selection.kind === "joint") {
-    const mesh = rigVisual.joints[selection.id];
-    if (!mesh) return;
-    const track = getJointTrack(state, selection.id);
-    setVec3Key(track, frame, { x: mesh.position.x, y: mesh.position.y, z: mesh.position.z });
+    const targetIds = dirtyJointIds.size ? Array.from(dirtyJointIds) : [selection.id];
+    targetIds.forEach((jointId) => {
+      const mesh = rigVisual.joints[jointId];
+      if (!mesh) return;
+      const track = getJointTrack(state, jointId);
+      setVec3Key(track, frame, { x: mesh.position.x, y: mesh.position.y, z: mesh.position.z });
+    });
+    dirtyJointIds.clear();
   } else if (selection.kind === "rigRoot") {
     const pos = rigVisual.group.position;
     const scale = rigVisual.group.scale;
@@ -695,6 +882,7 @@ function updateRig(frame: number) {
     idx += 1;
   }
   attr.needsUpdate = true;
+  syncJointRotationHelper();
 }
 
 function updateCamera(frame: number) {
@@ -932,8 +1120,12 @@ function switchProfile(id: RigProfileId) {
   state = newState;
   markTimelineDirty();
   disposeRigVisual(rigVisual);
-  rigVisual = buildRig(getProfile(id));
-  centroids = computeGroupCentroids(getProfile(id));
+  const profile = getProfile(id);
+  rigVisual = buildRig(profile);
+  centroids = computeGroupCentroids(profile);
+  jointChildren = buildJointChildren(profile);
+  jointDescendantsCache = {};
+  currentRotationDescendants = [];
   selection = null;
   ui.refreshJointList();
   ui.updateTimeline();
@@ -1060,8 +1252,12 @@ function loadFromFile(file: File) {
       markTimelineDirty();
       stopPlayback();
       disposeRigVisual(rigVisual);
-      rigVisual = buildRig(getProfile(state.rigProfileId));
-      centroids = computeGroupCentroids(getProfile(state.rigProfileId));
+      const profile = getProfile(state.rigProfileId);
+      rigVisual = buildRig(profile);
+      centroids = computeGroupCentroids(profile);
+      jointChildren = buildJointChildren(profile);
+      jointDescendantsCache = {};
+      currentRotationDescendants = [];
       selection = null;
       ui.refreshJointList();
       ui.updateTimeline();
@@ -1233,17 +1429,21 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
   });
 
   const transformButtons = container.querySelectorAll<HTMLButtonElement>('[data-ctrl="transform-modes"] button');
+  const syncTransformButtons = () => {
+    transformButtons.forEach((btn) => {
+      const mode = btn.dataset.mode as ("translate" | "rotate" | "scale" | undefined);
+      btn.classList.toggle("active", mode === transformMode);
+    });
+  };
   transformButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
-      transformButtons.forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      const mode = btn.dataset.mode as "translate" | "rotate" | "scale" | undefined;
-      if (mode) {
-        setTransformMode(mode);
-      }
+      const mode = btn.dataset.mode as ("translate" | "rotate" | "scale" | undefined);
+      if (!mode) return;
+      setTransformMode(mode);
+      syncTransformButtons();
     });
   });
-  transformButtons[0].classList.add("active");
+  syncTransformButtons();
 
   const selectionLabel = container.querySelector<HTMLDivElement>('[data-ctrl="selection-label"]')!;
   const groupScaleWrap = container.querySelector<HTMLDivElement>('[data-ctrl="group-scales"]')!;
@@ -1468,6 +1668,9 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
         });
         jointList.appendChild(btn);
       }
+    },
+    updateTransformMode: () => {
+      syncTransformButtons();
     },
     updateSelection: () => {
       if (!selection) {
@@ -1715,6 +1918,7 @@ function animate() {
     }
   }
   controls.update();
+  syncJointRotationHelper();
   renderer.autoClear = true;
   renderer.render(scene, camera);
   renderer.autoClear = false;
