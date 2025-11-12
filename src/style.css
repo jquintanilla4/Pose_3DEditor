@@ -1,0 +1,193 @@
+:root {
+  font-family: "Inter", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  color: #f1f1f1;
+  background: #050608;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #050608;
+  color: inherit;
+  min-height: 100vh;
+}
+
+#app,
+.layout {
+  width: 100%;
+  height: 100vh;
+}
+
+.layout {
+  display: flex;
+  overflow: hidden;
+}
+
+.viewport {
+  flex: 1;
+  position: relative;
+  background: #050608;
+}
+
+.viewport canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.panel {
+  width: 340px;
+  max-width: 340px;
+  background: #0f131a;
+  border-left: 1px solid #1d2230;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.panel section {
+  border: 1px solid #1f2535;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+  background: #101625;
+}
+
+.panel header {
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #9fd2ff;
+}
+
+.panel label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.78rem;
+  margin-bottom: 8px;
+}
+
+.panel input,
+.panel select,
+.panel button {
+  border-radius: 4px;
+  border: 1px solid #2a3147;
+  background: #141b2b;
+  color: inherit;
+  padding: 6px 8px;
+  font-size: 0.85rem;
+}
+
+.panel button {
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.panel button:hover,
+.panel button.active {
+  border-color: #3ea6ff;
+  background: #1c2538;
+}
+
+.field-row {
+  display: flex;
+  gap: 8px;
+}
+
+.button-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.selection-label {
+  font-size: 0.85rem;
+  color: #b6c5dd;
+  padding: 6px 0;
+}
+
+.joint-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.joint-list button {
+  text-align: left;
+}
+
+.guides label {
+  font-size: 0.8rem;
+  gap: 6px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.status {
+  font-size: 0.78rem;
+  color: #9fb3d8;
+  min-height: 20px;
+}
+
+input[type="range"] {
+  accent-color: #3ea6ff;
+}
+
+.group-scale-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.group-scale-row {
+  border: 1px solid #1f2535;
+  border-radius: 6px;
+  padding: 8px;
+  background: #12192a;
+}
+
+.group-scale-title {
+  font-size: 0.82rem;
+  color: #c7ddff;
+  margin-bottom: 6px;
+}
+
+.group-scale-axes {
+  display: flex;
+  gap: 8px;
+}
+
+.group-scale-axes label {
+  flex: 1;
+  font-size: 0.75rem;
+}
+
+.group-scale-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+  gap: 6px;
+}
+
+.group-scale-empty {
+  font-size: 0.8rem;
+  color: #8d9bb5;
+}
+
+.ease-row {
+  align-items: flex-end;
+}
+
+.ease-row select {
+  min-width: 120px;
+}
+
+.ease-status {
+  font-size: 0.75rem;
+  color: #b6c5dd;
+}

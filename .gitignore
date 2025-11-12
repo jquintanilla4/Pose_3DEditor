@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+dist/
+coverage/
+
+# TypeScript incremental metadata
+*.tsbuildinfo
+
+# Logs and runtime data
+logs/
+*.log
+*.pid
+*.seed
+
+# Local environment overrides
+.env
+.env.*
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Misc caches
+.parcel-cache/
+.eslintcache
+.cache/
