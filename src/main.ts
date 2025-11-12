@@ -97,6 +97,72 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 viewportHost.appendChild(renderer.domElement);
 
+const fileMenu = document.createElement("div");
+fileMenu.className = "file-menu";
+fileMenu.innerHTML = `
+  <button class="file-menu-toggle" aria-label="File menu" aria-haspopup="true" aria-expanded="false">
+    <span></span>
+    <span></span>
+    <span></span>
+  </button>
+  <div class="file-menu-dropdown" role="menu">
+    <button type="button" role="menuitem" data-ctrl="import-json">Import JSON</button>
+    <button type="button" role="menuitem" data-ctrl="export-json">Export JSON</button>
+  </div>
+`;
+viewportHost.appendChild(fileMenu);
+const fileMenuToggle = fileMenu.querySelector<HTMLButtonElement>(".file-menu-toggle")!;
+const fileMenuDropdown = fileMenu.querySelector<HTMLDivElement>(".file-menu-dropdown")!;
+const importJsonBtn = fileMenu.querySelector<HTMLButtonElement>('[data-ctrl="import-json"]')!;
+const exportJsonBtn = fileMenu.querySelector<HTMLButtonElement>('[data-ctrl="export-json"]')!;
+const importInput = document.createElement("input");
+importInput.type = "file";
+importInput.accept = "application/json";
+importInput.style.display = "none";
+fileMenu.appendChild(importInput);
+let fileMenuOpen = false;
+const setFileMenuOpen = (open: boolean) => {
+  fileMenuOpen = open;
+  fileMenu.classList.toggle("open", open);
+  fileMenuToggle.setAttribute("aria-expanded", open ? "true" : "false");
+};
+setFileMenuOpen(false);
+fileMenuToggle.addEventListener("click", (event) => {
+  event.stopPropagation();
+  setFileMenuOpen(!fileMenuOpen);
+});
+fileMenuToggle.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    setFileMenuOpen(false);
+  }
+});
+fileMenuDropdown.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    setFileMenuOpen(false);
+    fileMenuToggle.focus();
+  }
+});
+document.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof Node)) return;
+  if (!fileMenu.contains(target)) {
+    setFileMenuOpen(false);
+  }
+});
+importJsonBtn.addEventListener("click", () => {
+  setFileMenuOpen(false);
+  importInput.click();
+});
+exportJsonBtn.addEventListener("click", () => {
+  setFileMenuOpen(false);
+  saveToFile();
+});
+importInput.addEventListener("change", () => {
+  const file = importInput.files?.[0];
+  if (file) loadFromFile(file);
+  importInput.value = "";
+});
+
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x050505);
 const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 1000);
@@ -2015,21 +2081,12 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
       <div class="selection-label" data-ctrl="selection-label">No selection</div>
     </section>
     <section>
-      <header>Groups</header>
-      <div class="group-scale-list" data-ctrl="group-scales"></div>
+      <header>Joints</header>
+      <div class="joint-list" data-ctrl="joint-list"></div>
     </section>
     <section>
-      <header>Output</header>
-      <div class="field-row">
-        <label>Width <input type="number" data-ctrl="out-width" min="1" /></label>
-        <label>Height <input type="number" data-ctrl="out-height" min="1" /></label>
-      </div>
-      <div class="field-row">
-        <label>Pixel Aspect <input type="number" step="0.01" data-ctrl="out-pa" /></label>
-        <label>Render Scale <input type="number" step="0.1" data-ctrl="out-scale" /></label>
-      </div>
-      <label>Overscan % <input type="number" step="0.5" data-ctrl="out-overscan" /></label>
-      <div class="guides" data-ctrl="guides"></div>
+      <header>Groups</header>
+      <div class="group-scale-list" data-ctrl="group-scales"></div>
     </section>
     <section>
       <header>Video Plane</header>
@@ -2050,18 +2107,44 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
       </div>
     </section>
     <section>
-      <header>Joints</header>
-      <div class="joint-list" data-ctrl="joint-list"></div>
-    </section>
-    <section>
-      <header>IO</header>
-      <div class="button-row">
-        <button data-ctrl="save-json">Save JSON</button>
-        <button data-ctrl="load-json">Load JSON</button>
+      <header>Output</header>
+      <div class="field-row">
+        <label>Width <input type="number" data-ctrl="out-width" min="1" /></label>
+        <label>Height <input type="number" data-ctrl="out-height" min="1" /></label>
       </div>
+      <div class="field-row">
+        <label>Pixel Aspect <input type="number" step="0.01" data-ctrl="out-pa" /></label>
+        <label>Render Scale <input type="number" step="0.1" data-ctrl="out-scale" /></label>
+      </div>
+      <label>Overscan % <input type="number" step="0.5" data-ctrl="out-overscan" /></label>
+      <div class="guides" data-ctrl="guides"></div>
       <div class="status" data-ctrl="status">Ready.</div>
     </section>
   `;
+
+  const toggleSectionState = (section: HTMLElement, collapsed?: boolean) => {
+    const targetState = collapsed ?? !section.classList.contains("collapsed");
+    section.classList.toggle("collapsed", targetState);
+    const header = section.querySelector<HTMLElement>("header");
+    if (header) {
+      header.setAttribute("aria-expanded", targetState ? "false" : "true");
+    }
+  };
+
+  container.querySelectorAll<HTMLElement>("section > header").forEach((header) => {
+    const section = header.parentElement as HTMLElement | null;
+    if (!section) return;
+    header.setAttribute("role", "button");
+    header.setAttribute("aria-expanded", "true");
+    header.tabIndex = 0;
+    header.addEventListener("click", () => toggleSectionState(section));
+    header.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        toggleSectionState(section);
+      }
+    });
+  });
 
   const profileSelect = container.querySelector<HTMLSelectElement>('[data-ctrl="profile"]')!;
 
@@ -2229,20 +2312,6 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
   });
 
   const jointList = container.querySelector<HTMLDivElement>('[data-ctrl="joint-list"]')!;
-
-  const saveBtn = container.querySelector<HTMLButtonElement>('[data-ctrl="save-json"]')!;
-  saveBtn.addEventListener("click", saveToFile);
-  const loadBtn = container.querySelector<HTMLButtonElement>('[data-ctrl="load-json"]')!;
-  const loadInput = document.createElement("input");
-  loadInput.type = "file";
-  loadInput.accept = "application/json";
-  loadInput.style.display = "none";
-  loadInput.addEventListener("change", () => {
-    const file = loadInput.files?.[0];
-    if (file) loadFromFile(file);
-  });
-  container.appendChild(loadInput);
-  loadBtn.addEventListener("click", () => loadInput.click());
 
   const updateGroupRowValues = (groupId: string, value: Vec3) => {
     const entry = groupScaleInputs.get(groupId);

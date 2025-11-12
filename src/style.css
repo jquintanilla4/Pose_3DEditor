@@ -51,12 +51,92 @@ body {
   overflow-y: auto;
 }
 
+.file-menu {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.file-menu-toggle {
+  width: 40px;
+  height: 36px;
+  border-radius: 8px;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.file-menu-toggle span {
+  width: 18px;
+  height: 2px;
+  border-radius: 2px;
+  background: #c7ddff;
+}
+
+.file-menu-toggle:hover,
+.file-menu.open .file-menu-toggle {
+  background: rgba(24, 32, 54, 0.6);
+}
+
+.file-menu-toggle:focus-visible {
+  outline: 2px solid #3ea6ff;
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+.file-menu-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  display: none;
+  flex-direction: column;
+  min-width: 160px;
+  background: #0f131a;
+  border: 1px solid #1f2535;
+  border-radius: 8px;
+  padding: 8px;
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.45);
+}
+
+.file-menu.open .file-menu-dropdown {
+  display: flex;
+}
+
+.file-menu-dropdown button {
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.file-menu-dropdown button:hover {
+  background: #1c2538;
+}
+
 .panel section {
   border: 1px solid #1f2535;
   border-radius: 8px;
   padding: 12px;
   margin-bottom: 12px;
   background: #101625;
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
 
 .panel header {
@@ -64,6 +144,35 @@ body {
   font-weight: 600;
   margin-bottom: 8px;
   color: #9fd2ff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  user-select: none;
+}
+
+.panel section header::after {
+  content: "-";
+  font-weight: 700;
+  color: #c3dcff;
+}
+
+.panel section.collapsed header::after {
+  content: "+";
+}
+
+.panel section.collapsed > :not(header) {
+  display: none;
+}
+
+.panel section.collapsed header {
+  margin-bottom: 0;
+}
+
+.panel section header:focus-visible {
+  outline: 2px solid #3ea6ff;
+  border-radius: 4px;
+  outline-offset: 2px;
 }
 
 .panel label {
@@ -149,8 +258,6 @@ body {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 6px;
-  max-height: 240px;
-  overflow-y: auto;
 }
 
 .joint-list button {
