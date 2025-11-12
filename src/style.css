@@ -117,6 +117,34 @@ body {
   padding: 6px 0;
 }
 
+.scale-readout {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.8rem;
+  color: #b6c5dd;
+  padding: 4px 0 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.scale-value {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.scale-value input {
+  width: 82px;
+  text-align: right;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.scale-value span {
+  color: #ffffff;
+  font-weight: 600;
+}
+
 .joint-list {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
@@ -157,6 +185,11 @@ input[type="range"] {
   border-radius: 6px;
   padding: 8px;
   background: #12192a;
+}
+
+.group-scale-row.active {
+  border-color: #3ea6ff;
+  box-shadow: 0 0 0 1px rgba(62, 166, 255, 0.3);
 }
 
 .group-scale-title {

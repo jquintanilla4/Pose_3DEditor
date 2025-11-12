@@ -34,6 +34,7 @@ const PROFILE_IDS = Object.keys(RIG_PROFILES) as RigProfileId[];
 
 type Selection =
   | { kind: "joint"; id: string }
+  | { kind: "group"; id: string }
   | { kind: "rigRoot" }
   | { kind: "videoPlane" }
   | null;
@@ -66,6 +67,7 @@ type UIController = {
   refreshJointList: () => void;
   updateSelection: () => void;
   updateTransformMode: () => void;
+  updateScaleFactor: (value: number | null) => void;
   updateTimeline: () => void;
   updateOutputControls: () => void;
   updateGuideControls: () => void;
@@ -108,10 +110,13 @@ transformControls.setSize(0.75);
 scene.add(transformControls.getHelper());
 
 const jointRotationHelper = new THREE.Object3D();
+const jointTranslateGroupHelper = new THREE.Object3D();
 const jointRotationPrevQuat = new THREE.Quaternion();
 const identityQuat = new THREE.Quaternion();
 const jointRotationDelta = new THREE.Quaternion();
 const jointRotationPrevInverse = new THREE.Quaternion();
+const jointTranslatePrevPosition = new THREE.Vector3();
+const jointTranslateDelta = new THREE.Vector3();
 
 const ambient = new THREE.AmbientLight(0xffffff, 0.5);
 scene.add(ambient);
@@ -286,9 +291,90 @@ class GateOverlay {
 
 const overlay = new GateOverlay(renderer);
 
+class ScaleGizmo {
+  group = new THREE.Group();
+  private line: THREE.Line;
+  private arrow: THREE.Mesh;
+  private linePositions: THREE.BufferAttribute;
+  private arrowAxis = new THREE.Vector3(0, 1, 0);
+  private tempDir = new THREE.Vector3();
+  private tempQuat = new THREE.Quaternion();
+  private pickTargets: THREE.Object3D[] = [];
+
+  constructor() {
+    const lineGeo = new THREE.BufferGeometry();
+    lineGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
+    const lineMat = new THREE.LineDashedMaterial({
+      color: 0xffffff,
+      dashSize: 0.08,
+      gapSize: 0.05,
+      depthTest: false,
+      depthWrite: false,
+      transparent: true,
+      opacity: 0.9
+    });
+    this.line = new THREE.Line(lineGeo, lineMat);
+    this.line.computeLineDistances();
+    this.group.add(this.line);
+    this.linePositions = lineGeo.getAttribute("position") as THREE.BufferAttribute;
+
+    const coneGeo = new THREE.ConeGeometry(0.04, 0.12, 14);
+    coneGeo.translate(0, -0.06, 0);
+    const coneMat = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false, depthWrite: false });
+    this.arrow = new THREE.Mesh(coneGeo, coneMat);
+    this.group.add(this.arrow);
+    this.pickTargets = [this.line, this.arrow];
+
+    this.group.visible = false;
+    this.group.renderOrder = 1000;
+  }
+
+  update(start: THREE.Vector3, end: THREE.Vector3) {
+    this.linePositions.setXYZ(0, start.x, start.y, start.z);
+    this.linePositions.setXYZ(1, end.x, end.y, end.z);
+    this.linePositions.needsUpdate = true;
+    this.line.computeLineDistances();
+
+    const dir = this.tempDir.copy(end).sub(start);
+    const lengthSq = dir.lengthSq();
+    if (lengthSq > 1e-6) {
+      dir.normalize();
+      this.tempQuat.setFromUnitVectors(this.arrowAxis, dir);
+      this.arrow.quaternion.copy(this.tempQuat);
+      this.arrow.visible = true;
+    } else {
+      this.arrow.visible = false;
+    }
+    this.arrow.position.copy(end);
+  }
+
+  show(start: THREE.Vector3, end: THREE.Vector3) {
+    this.update(start, end);
+    this.group.visible = true;
+  }
+
+  hide() {
+    this.group.visible = false;
+  }
+
+  isVisible(): boolean {
+    return this.group.visible;
+  }
+
+  hitTest(raycaster: THREE.Raycaster): boolean {
+    if (!this.group.visible) return false;
+    return raycaster.intersectObjects(this.pickTargets, false).length > 0;
+  }
+}
+
+const scaleGizmo = new ScaleGizmo();
+scene.add(scaleGizmo.group);
+
 let state: EditorState = createEditorState(DEFAULT_PROFILE_ID);
 let selection: Selection = null;
+const jointSelection = new Set<string>();
 let transformMode: "translate" | "rotate" | "scale" = "translate";
+let transformControlsDragging = false;
 let currentFrame = 0;
 let isPlaying = false;
 let loopPlayback = true;
@@ -300,6 +386,7 @@ const dirtyJointIds = new Set<string>();
 let videoRuntime: VideoRuntime | null = null;
 let rigVisual = buildRig(getProfile(state.rigProfileId));
 rigVisual.group.add(jointRotationHelper);
+rigVisual.group.add(jointTranslateGroupHelper);
 let centroids = computeGroupCentroids(getProfile(state.rigProfileId));
 let jointChildren = buildJointChildren(getProfile(state.rigProfileId));
 let jointDescendantsCache: Record<string, string[]> = {};
@@ -422,6 +509,34 @@ const depthBrushState = {
 const depthBrushDirection = new THREE.Vector3();
 const depthBrushOffset = new THREE.Vector3();
 
+const SCALE_MIN_FACTOR = 0.1;
+const SCALE_MAX_FACTOR = 5;
+const SCALE_MIN_DISTANCE = 0.01;
+
+const scaleGestureState = {
+  active: false,
+  pointerId: -1,
+  targets: [] as string[],
+  pivotLocal: new THREE.Vector3(),
+  pivotWorld: new THREE.Vector3(),
+  plane: new THREE.Plane(),
+  startPoint: new THREE.Vector3(),
+  currentPoint: new THREE.Vector3(),
+  startDistance: 1,
+  factor: 1,
+  baseFactor: 1,
+  initialPositions: new Map<string, THREE.Vector3>()
+};
+const scalePlaneNormal = new THREE.Vector3();
+const scaleTempVec = new THREE.Vector3();
+const scaleManualPivotLocal = new THREE.Vector3();
+const scalePreviewPivotLocal = new THREE.Vector3();
+const scalePreviewPivotWorld = new THREE.Vector3();
+const scalePreviewEnd = new THREE.Vector3();
+const scalePreviewDir = new THREE.Vector3();
+let lastScaleFactor = 1;
+let lastScaleSelectionKey: string | null = null;
+
 const timelineUI = createTimelineBar(app);
 ui = buildPanel(panel, timelineUI);
 ui.refreshJointList();
@@ -445,9 +560,29 @@ renderer.domElement.addEventListener("pointermove", onPointerMove);
 renderer.domElement.addEventListener("pointerup", onPointerUp);
 renderer.domElement.addEventListener("pointerleave", onPointerUp);
 renderer.domElement.addEventListener("pointercancel", onPointerUp);
+renderer.domElement.addEventListener("lostpointercapture", (event: PointerEvent) => {
+  if (scaleGestureState.active && event.pointerId === scaleGestureState.pointerId) {
+    endScaleGesture();
+  }
+});
+const handleGlobalPointerEnd = (event: PointerEvent) => {
+  if (scaleGestureState.active && event.pointerId === scaleGestureState.pointerId) {
+    endScaleGesture(event);
+  }
+  if (depthBrushState.active && event.pointerId === depthBrushState.pointerId) {
+    endDepthBrush(event);
+  }
+};
+window.addEventListener("pointerup", handleGlobalPointerEnd);
+window.addEventListener("pointercancel", handleGlobalPointerEnd);
+window.addEventListener("blur", () => {
+  endScaleGesture();
+  endDepthBrush();
+});
 
 transformControls.addEventListener("dragging-changed", (event: TransformControlsEventMap["dragging-changed"]) => {
   const isDragging = Boolean(event.value);
+  transformControlsDragging = isDragging;
   controls.enabled = !isDragging;
 });
 
@@ -456,12 +591,16 @@ transformControls.addEventListener("objectChange", () => {
   let changed = false;
   if (selection.kind === "joint") {
     if (transformMode === "rotate") {
-      changed = applyJointRotationDelta();
-    } else {
-      dirtyJointIds.add(selection.id);
-      selectionDirty = true;
-      refreshBoneGeometryFromMeshes();
-      changed = true;
+      changed = jointSelection.size > 1 ? applyMultiJointRotationDelta() : applyJointRotationDelta();
+    } else if (transformMode === "translate") {
+      if (jointSelection.size > 1) {
+        changed = applyMultiJointTranslationDelta();
+      } else {
+        dirtyJointIds.add(selection.id);
+        selectionDirty = true;
+        refreshBoneGeometryFromMeshes();
+        changed = true;
+      }
     }
   } else {
     selectionDirty = true;
@@ -480,9 +619,21 @@ const viewportKeyHandler = (event: KeyboardEvent) => {
   if (event.metaKey || event.ctrlKey || event.altKey) return;
   if (isTextInputTarget(event.target)) return;
   const key = event.key.toLowerCase();
+  if (scaleGestureState.active) {
+    if (key === "escape") {
+      endScaleGesture();
+    }
+    return;
+  }
+  if (key === "escape") {
+    if (selection?.kind === "joint" || jointSelection.size) {
+      event.preventDefault();
+      deselectAllJoints();
+    }
+    return;
+  }
   if (key === "g") {
-    selection = { kind: "rigRoot" };
-    updateSelection();
+    selectRigRoot();
     return;
   }
   if (key === "w") {
@@ -493,6 +644,12 @@ const viewportKeyHandler = (event: KeyboardEvent) => {
   if (key === "e") {
     event.preventDefault();
     setTransformMode("rotate");
+    return;
+  }
+  if (key === "s") {
+    event.preventDefault();
+    setTransformMode("scale");
+    return;
   }
 };
 window.addEventListener("keydown", viewportKeyHandler);
@@ -589,34 +746,53 @@ function onPointerDown(event: PointerEvent) {
       return;
     }
   }
-  if (depthBrushState.active) return;
-  const rect = renderer.domElement.getBoundingClientRect();
-  pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-  pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(pointer, camera);
-  const targets = Object.values(rigVisual.joints);
-  const intersects = raycaster.intersectObjects(targets, false);
-  if (intersects.length > 0) {
-    const jointId = intersects[0].object.name;
-    selection = { kind: "joint", id: jointId };
-    updateSelection();
+  if (depthBrushState.active || scaleGestureState.active) return;
+
+  const jointId = pickJointUnderPointer(event);
+  const toggleSelection = event.metaKey || event.ctrlKey;
+  const additiveSelection = event.shiftKey && !toggleSelection;
+  if (jointId) {
+    const alreadySelected = selection?.kind === "joint" && jointSelection.has(jointId);
+    const shouldModifySelection = toggleSelection || additiveSelection || !alreadySelected || selection?.kind !== "joint";
+    if (shouldModifySelection) {
+      selectJoint(jointId, { additive: additiveSelection, toggle: toggleSelection });
+      return;
+    }
+  }
+
+  const gizmoHit = transformMode === "scale" && scaleGizmo.hitTest(raycaster);
+  const jointSelectionHit = selection?.kind === "joint" && jointId ? jointSelection.has(jointId) : false;
+  const canScale =
+    transformMode === "scale" &&
+    selection &&
+    (selection.kind === "group" || gizmoHit || jointSelectionHit);
+
+  if (canScale && beginScaleGesture(event)) {
+    return;
   }
 }
 
 function onPointerMove(event: PointerEvent) {
-  if (!depthBrushState.active || depthBrushState.pointerId !== event.pointerId) return;
-  updateDepthBrush(event);
+  if (scaleGestureState.active && scaleGestureState.pointerId === event.pointerId) {
+    updateScaleGesture(event);
+    return;
+  }
+  if (depthBrushState.active && depthBrushState.pointerId === event.pointerId) {
+    updateDepthBrush(event);
+  }
 }
 
 function onPointerUp(event: PointerEvent) {
-  if (!depthBrushState.active || depthBrushState.pointerId !== event.pointerId) {
-    return;
+  if (scaleGestureState.active && scaleGestureState.pointerId === event.pointerId) {
+    endScaleGesture(event);
   }
-  endDepthBrush(event);
+  if (depthBrushState.active && depthBrushState.pointerId === event.pointerId) {
+    endDepthBrush(event);
+  }
 }
 
 function beginDepthBrush(event: PointerEvent): boolean {
-  if (!selection || selection.kind !== "joint") return false;
+  if (!selection || selection.kind !== "joint" || jointSelection.size > 1) return false;
   const mesh = rigVisual.joints[selection.id];
   if (!mesh) return false;
   depthBrushState.active = true;
@@ -647,7 +823,7 @@ function updateDepthBrush(event: PointerEvent) {
     ui.showStatus("Transform pending — click Key Selected to store");
   }
   refreshBoneGeometryFromMeshes();
-  syncJointRotationHelper();
+  syncJointTransformHelpers();
 }
 
 function endDepthBrush(event?: PointerEvent) {
@@ -662,48 +838,392 @@ function endDepthBrush(event?: PointerEvent) {
   depthBrushState.startPos.set(0, 0, 0);
   controls.enabled = true;
   transformControlsToggle.enabled = true;
-  syncJointRotationHelper();
+  syncJointTransformHelpers();
+}
+
+function updatePointerRay(event: PointerEvent) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  const width = rect.width || 1;
+  const height = rect.height || 1;
+  pointer.x = ((event.clientX - rect.left) / width) * 2 - 1;
+  pointer.y = -((event.clientY - rect.top) / height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+}
+
+function pickJointUnderPointer(event: PointerEvent): string | null {
+  updatePointerRay(event);
+  const targets = Object.values(rigVisual.joints);
+  const intersects = raycaster.intersectObjects(targets, false);
+  if (!intersects.length) return null;
+  return intersects[0].object.name;
+}
+
+type JointSelectionOptions = {
+  additive?: boolean;
+  toggle?: boolean;
+};
+
+function selectJoint(jointId: string, options?: JointSelectionOptions) {
+  const id = jointId;
+  let changed = false;
+  if (options?.toggle) {
+    if (jointSelection.has(id)) {
+      jointSelection.delete(id);
+    } else {
+      jointSelection.add(id);
+    }
+    changed = true;
+  } else if (options?.additive) {
+    if (!jointSelection.has(id)) {
+      jointSelection.add(id);
+      changed = true;
+    }
+  } else {
+    if (jointSelection.size !== 1 || !jointSelection.has(id)) {
+      changed = true;
+    }
+    jointSelection.clear();
+    jointSelection.add(id);
+  }
+
+  if (!jointSelection.size) {
+    const hadSelection = Boolean(selection);
+    selection = null;
+    if (changed || hadSelection) {
+      updateSelection();
+    }
+    return;
+  }
+
+  const preferred =
+    jointSelection.has(id) || !selection || selection.kind !== "joint" || !jointSelection.has(selection.id)
+      ? (jointSelection.has(id) ? id : jointSelection.values().next().value)
+      : selection.id;
+  const prevKey = selection?.kind === "joint" ? selection.id : null;
+  selection = preferred ? { kind: "joint", id: preferred } : null;
+  if (changed || preferred !== prevKey) {
+    updateSelection();
+  }
+}
+
+function clearJointSelection() {
+  jointSelection.clear();
+}
+
+function deselectAllJoints() {
+  const hadJointSelection = jointSelection.size > 0;
+  const hadJointFocus = selection?.kind === "joint";
+  if (!hadJointSelection && !hadJointFocus) {
+    return;
+  }
+  jointSelection.clear();
+  if (hadJointFocus) {
+    selection = null;
+  }
+  updateSelection();
+}
+
+function getJointSelectionSnapshot(): string[] {
+  if (!selection || selection.kind !== "joint") return [];
+  if (jointSelection.size) return Array.from(jointSelection);
+  return [selection.id];
+}
+
+function getSelectionJointTargets(): string[] {
+  if (!selection) return [];
+  if (selection.kind === "joint") return getJointSelectionSnapshot();
+  if (selection.kind === "group") return getGroupJointIds(selection.id);
+  return [];
+}
+
+function getScaleSelectionKey(): string | null {
+  if (!selection) return null;
+  if (selection.kind === "joint") {
+    const ids = getJointSelectionSnapshot();
+    if (!ids.length) return null;
+    return `joint:${ids.slice().sort().join(",")}`;
+  }
+  if (selection.kind === "group") {
+    return `group:${selection.id}`;
+  }
+  return null;
+}
+
+function computePivotFromTargets(targets: string[], out: THREE.Vector3): boolean {
+  out.set(0, 0, 0);
+  let count = 0;
+  for (const jointId of targets) {
+    const mesh = rigVisual.joints[jointId];
+    if (!mesh) continue;
+    out.add(mesh.position);
+    count += 1;
+  }
+  if (!count) return false;
+  out.multiplyScalar(1 / count);
+  return true;
+}
+
+function copyRigLocalToWorld(local: THREE.Vector3, target: THREE.Vector3): THREE.Vector3 {
+  rigVisual.group.updateMatrixWorld(true);
+  target.copy(local);
+  return rigVisual.group.localToWorld(target);
+}
+
+function refreshScaleReadout() {
+  if (!ui) return;
+  if (
+    transformMode === "scale" &&
+    selection &&
+    (selection.kind === "joint" || selection.kind === "group")
+  ) {
+    const activeValue = scaleGestureState.baseFactor * scaleGestureState.factor;
+    const value = scaleGestureState.active ? activeValue : lastScaleFactor;
+    ui.updateScaleFactor(value);
+  } else {
+    ui.updateScaleFactor(null);
+  }
+}
+
+function refreshScaleIndicators() {
+  updateScaleGizmoPreview();
+  refreshScaleReadout();
+}
+
+function updateScaleGizmoPreview() {
+  if (scaleGestureState.active) return;
+  if (transformMode !== "scale") {
+    scaleGizmo.hide();
+    return;
+  }
+  if (!selection || (selection.kind !== "joint" && selection.kind !== "group")) {
+    scaleGizmo.hide();
+    return;
+  }
+  const targets = getSelectionJointTargets();
+  if (!targets.length) {
+    scaleGizmo.hide();
+    return;
+  }
+  if (!computePivotFromTargets(targets, scalePreviewPivotLocal)) {
+    scaleGizmo.hide();
+    return;
+  }
+  copyRigLocalToWorld(scalePreviewPivotLocal, scalePreviewPivotWorld);
+  scalePreviewDir.copy(camera.position).sub(scalePreviewPivotWorld);
+  let distance = scalePreviewDir.length();
+  if (distance < 1e-3) {
+    scalePreviewDir.set(0, 1, 0);
+    distance = 1;
+  } else {
+    scalePreviewDir.multiplyScalar(1 / distance);
+  }
+  const handleLength = THREE.MathUtils.clamp(distance * 0.15, 0.2, 0.8);
+  scalePreviewEnd.copy(scalePreviewDir).multiplyScalar(handleLength).add(scalePreviewPivotWorld);
+  scaleGizmo.show(scalePreviewPivotWorld, scalePreviewEnd);
+}
+
+function beginScaleGesture(event: PointerEvent): boolean {
+  if (!selection || (selection.kind !== "joint" && selection.kind !== "group")) return false;
+  const targets = getSelectionJointTargets();
+  if (!targets.length) return false;
+  if (!computePivotFromTargets(targets, scaleGestureState.pivotLocal)) return false;
+  copyRigLocalToWorld(scaleGestureState.pivotLocal, scaleGestureState.pivotWorld);
+
+  updatePointerRay(event);
+  camera.getWorldDirection(scalePlaneNormal);
+  scaleGestureState.plane.setFromNormalAndCoplanarPoint(scalePlaneNormal, scaleGestureState.pivotWorld);
+  const hit = raycaster.ray.intersectPlane(scaleGestureState.plane, scaleGestureState.currentPoint);
+  if (!hit) return false;
+
+  scaleGestureState.startPoint.copy(scaleGestureState.currentPoint);
+  const distance = scaleGestureState.pivotWorld.distanceTo(scaleGestureState.currentPoint);
+  scaleGestureState.startDistance = distance;
+  scaleGestureState.targets = [];
+  scaleGestureState.initialPositions.clear();
+  for (const jointId of targets) {
+    const mesh = rigVisual.joints[jointId];
+    if (!mesh) continue;
+    scaleGestureState.targets.push(jointId);
+    scaleGestureState.initialPositions.set(jointId, mesh.position.clone());
+  }
+  if (!scaleGestureState.targets.length) return false;
+
+  scaleGestureState.active = true;
+  scaleGestureState.pointerId = event.pointerId;
+  scaleGestureState.factor = 1;
+  scaleGestureState.baseFactor = lastScaleFactor;
+  controls.enabled = false;
+  transformControlsToggle.enabled = false;
+  renderer.domElement.setPointerCapture(event.pointerId);
+  scaleGizmo.show(scaleGestureState.pivotWorld, scaleGestureState.currentPoint);
+  refreshScaleReadout();
+  return true;
+}
+
+function applyScaleFactor(factor: number) {
+  if (!scaleGestureState.active) return;
+  const pivot = scaleGestureState.pivotLocal;
+  scaleGestureState.factor = factor;
+  const combinedFactor = scaleGestureState.baseFactor * factor;
+  lastScaleFactor = combinedFactor;
+  for (const jointId of scaleGestureState.targets) {
+    const mesh = rigVisual.joints[jointId];
+    const original = scaleGestureState.initialPositions.get(jointId);
+    if (!mesh || !original) continue;
+    scaleTempVec.copy(original).sub(pivot).multiplyScalar(factor).add(pivot);
+    mesh.position.copy(scaleTempVec);
+    dirtyJointIds.add(jointId);
+  }
+  selectionDirty = true;
+  refreshBoneGeometryFromMeshes();
+  refreshScaleReadout();
+}
+
+function scaleSelectionByRatio(factor: number): boolean {
+  if (!selection || (selection.kind !== "joint" && selection.kind !== "group")) return false;
+  if (!Number.isFinite(factor) || factor <= 0) return false;
+  const targets = getSelectionJointTargets();
+  if (!targets.length) return false;
+  if (!computePivotFromTargets(targets, scaleManualPivotLocal)) return false;
+  for (const jointId of targets) {
+    const mesh = rigVisual.joints[jointId];
+    if (!mesh) continue;
+    scaleTempVec.copy(mesh.position).sub(scaleManualPivotLocal).multiplyScalar(factor).add(scaleManualPivotLocal);
+    mesh.position.copy(scaleTempVec);
+    dirtyJointIds.add(jointId);
+  }
+  selectionDirty = true;
+  refreshBoneGeometryFromMeshes();
+  return true;
+}
+
+function applyScaleFactorFromInput(nextValue: number): boolean {
+  if (!selection || (selection.kind !== "joint" && selection.kind !== "group")) return false;
+  if (transformMode !== "scale") return false;
+  if (!Number.isFinite(nextValue)) return false;
+  if (scaleGestureState.active) {
+    endScaleGesture();
+  }
+  const targetFactor = Math.max(SCALE_MIN_FACTOR, nextValue);
+  const currentFactor = lastScaleFactor || 1;
+  if (!Number.isFinite(currentFactor) || currentFactor <= 0) return false;
+  const ratio = targetFactor / currentFactor;
+  if (!Number.isFinite(ratio) || ratio <= 0) return false;
+  if (Math.abs(ratio - 1) < 1e-4) {
+    lastScaleFactor = targetFactor;
+    refreshScaleReadout();
+    return true;
+  }
+  const updated = scaleSelectionByRatio(ratio);
+  if (!updated) return false;
+  lastScaleFactor = targetFactor;
+  if (state.autoKey) {
+    commitSelectionKey();
+    selectionDirty = false;
+  } else {
+    ui.showStatus("Transform pending — click Key Selected to store");
+  }
+  refreshScaleIndicators();
+  return true;
+}
+
+function updateScaleGesture(event: PointerEvent) {
+  if (!scaleGestureState.active || event.pointerId !== scaleGestureState.pointerId) return;
+  updatePointerRay(event);
+  const hit = raycaster.ray.intersectPlane(scaleGestureState.plane, scaleGestureState.currentPoint);
+  if (!hit) return;
+  const distance = scaleGestureState.pivotWorld.distanceTo(scaleGestureState.currentPoint);
+  const ratio = (distance + SCALE_MIN_DISTANCE) / (scaleGestureState.startDistance + SCALE_MIN_DISTANCE);
+  const factor = THREE.MathUtils.clamp(ratio, SCALE_MIN_FACTOR, SCALE_MAX_FACTOR);
+  applyScaleFactor(factor);
+  scaleGizmo.update(scaleGestureState.pivotWorld, scaleGestureState.currentPoint);
+}
+
+function endScaleGesture(event?: PointerEvent) {
+  if (!scaleGestureState.active) return;
+  if (event && event.pointerId !== scaleGestureState.pointerId) return;
+  if (scaleGestureState.pointerId !== -1 && renderer.domElement.hasPointerCapture(scaleGestureState.pointerId)) {
+    renderer.domElement.releasePointerCapture(scaleGestureState.pointerId);
+  }
+  scaleGestureState.active = false;
+  scaleGestureState.pointerId = -1;
+  scaleGestureState.factor = 1;
+  scaleGestureState.baseFactor = 1;
+  scaleGestureState.targets = [];
+  scaleGestureState.initialPositions.clear();
+  controls.enabled = true;
+  transformControlsToggle.enabled = true;
+  if (selectionDirty) {
+    if (state.autoKey) {
+      commitSelectionKey();
+      selectionDirty = false;
+    } else {
+      ui.showStatus("Transform pending — click Key Selected to store");
+    }
+  }
+  refreshScaleIndicators();
 }
 
 function setTransformMode(mode: "translate" | "rotate" | "scale"): boolean {
-  if (selection?.kind === "joint" && mode === "scale") {
-    ui.showStatus("Joint scaling isn't supported — use move or rotate.");
+  if (selection?.kind === "group" && mode !== "scale") {
+    ui.showStatus("Groups can only be scaled.");
     return false;
   }
-  if (transformMode === mode) return true;
-  transformMode = mode;
-  if (selection) {
-    if (selection.kind === "joint") {
-      attachJointTransform(selection.id);
-    } else {
-      transformControls.setMode(mode);
+  if (scaleGestureState.active && mode !== "scale") {
+    endScaleGesture();
+  }
+  const changed = transformMode !== mode;
+  if (changed) {
+    transformMode = mode;
+    if (mode === "scale") {
+      lastScaleFactor = 1;
+    }
+    if (selection) {
+      if (selection.kind === "joint") {
+        attachJointTransform(selection.id);
+      } else if (selection.kind === "rigRoot" || selection.kind === "videoPlane") {
+        transformControls.setMode(mode);
+      }
+    }
+    if (ui) {
+      ui.updateTransformMode();
     }
   }
-  if (ui) {
-    ui.updateTransformMode();
-  }
+  refreshScaleIndicators();
   return true;
 }
 
 function selectRigRoot() {
+  clearJointSelection();
   selection = { kind: "rigRoot" };
   updateSelection();
 }
 
 function selectVideoPlane() {
+  clearJointSelection();
   selection = { kind: "videoPlane" };
   updateSelection();
 }
 
 function updateSelection() {
+  endScaleGesture();
   selectionDirty = false;
   dirtyJointIds.clear();
   transformControls.detach();
+  if (!selection || selection.kind !== "joint") {
+    clearJointSelection();
+  }
   for (const [jointId, mat] of Object.entries(rigVisual.jointMaterials)) {
-    mat.color.set(selection?.kind === "joint" && selection.id === jointId ? 0xffc857 : 0x4cc9f0);
+    mat.color.set(jointSelection.has(jointId) ? 0xffc857 : 0x4cc9f0);
+  }
+  const scaleKey = getScaleSelectionKey();
+  if (scaleKey !== lastScaleSelectionKey) {
+    lastScaleSelectionKey = scaleKey;
+    lastScaleFactor = 1;
   }
   if (!selection) {
     ui.updateSelection();
+    refreshScaleIndicators();
     return;
   }
   if (selection.kind === "joint") {
@@ -718,20 +1238,62 @@ function updateSelection() {
   ui.updateTransformMode();
   ui.updateSelection();
   ui.updateEaseControls();
+  refreshScaleIndicators();
 }
 
 function attachJointTransform(jointId: string) {
+  if (jointSelection.size > 1) {
+    attachMultiJointTransform();
+    return;
+  }
   const mesh = rigVisual.joints[jointId];
-  if (!mesh) return;
+  if (!mesh) {
+    transformControls.detach();
+    currentRotationDescendants = [];
+    return;
+  }
   if (transformMode === "rotate") {
     prepareJointRotationHelper(mesh, jointId);
     transformControls.attach(jointRotationHelper);
     transformControls.setMode("rotate");
-  } else {
+  } else if (transformMode === "translate") {
     transformControls.attach(mesh);
     transformControls.setMode("translate");
     currentRotationDescendants = [];
+  } else {
+    transformControls.detach();
+    currentRotationDescendants = [];
   }
+}
+
+function attachMultiJointTransform() {
+  const targets = getJointSelectionSnapshot();
+  if (targets.length <= 1) {
+    if (selection?.kind === "joint") {
+      attachJointTransform(selection.id);
+    } else {
+      transformControls.detach();
+    }
+    return;
+  }
+  if (transformMode === "rotate") {
+    if (!prepareMultiJointRotationHelper(targets)) {
+      transformControls.detach();
+      return;
+    }
+    transformControls.attach(jointRotationHelper);
+    transformControls.setMode("rotate");
+  } else if (transformMode === "translate") {
+    if (!prepareJointTranslateGroupHelper(targets)) {
+      transformControls.detach();
+      return;
+    }
+    transformControls.attach(jointTranslateGroupHelper);
+    transformControls.setMode("translate");
+  } else {
+    transformControls.detach();
+  }
+  currentRotationDescendants = [];
 }
 
 function prepareJointRotationHelper(mesh: THREE.Mesh, jointId: string) {
@@ -742,12 +1304,45 @@ function prepareJointRotationHelper(mesh: THREE.Mesh, jointId: string) {
   currentRotationDescendants = getJointDescendants(jointId);
 }
 
-function syncJointRotationHelper() {
+function prepareMultiJointRotationHelper(targets: string[]): boolean {
+  if (!targets.length) return false;
+  if (!computePivotFromTargets(targets, jointRotationHelper.position)) return false;
+  jointRotationHelper.quaternion.identity();
+  jointRotationHelper.rotation.set(0, 0, 0);
+  jointRotationPrevQuat.identity();
+  currentRotationDescendants = [];
+  return true;
+}
+
+function prepareJointTranslateGroupHelper(targets: string[]): boolean {
+  if (!targets.length) return false;
+  if (!computePivotFromTargets(targets, jointTranslateGroupHelper.position)) return false;
+  jointTranslateGroupHelper.quaternion.identity();
+  jointTranslateGroupHelper.rotation.set(0, 0, 0);
+  jointTranslatePrevPosition.copy(jointTranslateGroupHelper.position);
+  return true;
+}
+
+function syncJointTransformHelpers() {
+  if (transformControlsDragging) return;
   if (!selection || selection.kind !== "joint") return;
-  if (transformMode !== "rotate") return;
-  const mesh = rigVisual.joints[selection.id];
-  if (!mesh) return;
-  jointRotationHelper.position.copy(mesh.position);
+  if (transformMode === "rotate") {
+    const targets = getJointSelectionSnapshot();
+    if (!targets.length) return;
+    if (targets.length > 1) {
+      computePivotFromTargets(targets, jointRotationHelper.position);
+    } else {
+      const mesh = rigVisual.joints[selection.id];
+      if (!mesh) return;
+      jointRotationHelper.position.copy(mesh.position);
+    }
+  } else if (transformMode === "translate" && jointSelection.size > 1) {
+    const targets = getJointSelectionSnapshot();
+    if (!targets.length) return;
+    if (computePivotFromTargets(targets, jointTranslateGroupHelper.position)) {
+      jointTranslatePrevPosition.copy(jointTranslateGroupHelper.position);
+    }
+  }
 }
 
 function refreshBoneGeometryFromMeshes() {
@@ -796,11 +1391,74 @@ function applyJointRotationDelta(): boolean {
   return changed;
 }
 
+function applyMultiJointTranslationDelta(): boolean {
+  if (!selection || selection.kind !== "joint") return false;
+  if (transformMode !== "translate") return false;
+  if (jointSelection.size <= 1) return false;
+  jointTranslateDelta.copy(jointTranslateGroupHelper.position).sub(jointTranslatePrevPosition);
+  if (jointTranslateDelta.lengthSq() < 1e-10) {
+    return false;
+  }
+  jointTranslatePrevPosition.copy(jointTranslateGroupHelper.position);
+  let changed = false;
+  getJointSelectionSnapshot().forEach((jointId) => {
+    const mesh = rigVisual.joints[jointId];
+    if (!mesh) return;
+    mesh.position.add(jointTranslateDelta);
+    dirtyJointIds.add(jointId);
+    changed = true;
+  });
+  if (changed) {
+    selectionDirty = true;
+    refreshBoneGeometryFromMeshes();
+  }
+  return changed;
+}
+
+function applyMultiJointRotationDelta(): boolean {
+  if (!selection || selection.kind !== "joint") return false;
+  if (transformMode !== "rotate") return false;
+  if (jointSelection.size <= 1) return false;
+  const currentQuat = jointRotationHelper.quaternion;
+  const prev = jointRotationPrevQuat;
+  jointRotationPrevInverse.copy(prev).invert();
+  jointRotationDelta.copy(currentQuat).multiply(jointRotationPrevInverse);
+  if (jointRotationDelta.angleTo(identityQuat) < 1e-4) {
+    return false;
+  }
+  prev.copy(currentQuat);
+  let changed = false;
+  const targets = getJointSelectionSnapshot();
+  targets.forEach((jointId) => {
+    const pivotMesh = rigVisual.joints[jointId];
+    if (!pivotMesh) return;
+    jointRotationPivot.copy(pivotMesh.position);
+    const descendants = getJointDescendants(jointId);
+    descendants.forEach((childId) => {
+      const child = rigVisual.joints[childId];
+      if (!child) return;
+      jointRotationTemp.copy(child.position).sub(jointRotationPivot);
+      jointRotationTemp.applyQuaternion(jointRotationDelta);
+      child.position.copy(jointRotationPivot).add(jointRotationTemp);
+      dirtyJointIds.add(childId);
+      changed = true;
+    });
+  });
+  if (changed) {
+    selectionDirty = true;
+    refreshBoneGeometryFromMeshes();
+  }
+  return changed;
+}
+
 function commitSelectionKey() {
   if (!selection) return;
   const frame = currentFrame;
-  if (selection.kind === "joint") {
-    const targetIds = dirtyJointIds.size ? Array.from(dirtyJointIds) : [selection.id];
+  if (selection.kind === "joint" || selection.kind === "group") {
+    const fallbackTargets =
+      selection.kind === "joint" ? getJointSelectionSnapshot() : getGroupJointIds(selection.id);
+    const targetIds = dirtyJointIds.size ? Array.from(dirtyJointIds) : fallbackTargets;
+    if (!targetIds.length) return;
     targetIds.forEach((jointId) => {
       const mesh = rigVisual.joints[jointId];
       if (!mesh) return;
@@ -882,7 +1540,7 @@ function updateRig(frame: number) {
     idx += 1;
   }
   attr.needsUpdate = true;
-  syncJointRotationHelper();
+  syncJointTransformHelpers();
 }
 
 function updateCamera(frame: number) {
@@ -939,6 +1597,7 @@ function requestPoseUpdate() {
   updateRig(currentFrame);
   updateVideoPlane(currentFrame);
   ui.updateTimeline();
+  refreshScaleIndicators();
 }
 
 function updateFrame(frame: number) {
@@ -953,6 +1612,7 @@ function updateFrame(frame: number) {
   ui.updateTimeline();
   ui.updateGroupControls();
   ui.updateEaseControls();
+  refreshScaleIndicators();
 }
 
 function toggleAutoKey() {
@@ -1004,7 +1664,15 @@ function getSelectionEaseTargets(): Key<any>[][] {
     targets.push(track.keysX, track.keysY, track.keysZ);
   };
   if (selection.kind === "joint") {
-    pushVec3(getJointTrack(state, selection.id));
+    getJointSelectionSnapshot().forEach((jointId) => {
+      pushVec3(getJointTrack(state, jointId));
+    });
+    return targets;
+  }
+  if (selection.kind === "group") {
+    getGroupJointIds(selection.id).forEach((jointId) => {
+      pushVec3(getJointTrack(state, jointId));
+    });
     return targets;
   }
   if (selection.kind === "rigRoot") {
@@ -1100,6 +1768,12 @@ function getGroupScaleValue(groupId: string): Vec3 {
   return sampleVec3(getGroupScaleTrack(state, groupId), currentFrame, vec3(1, 1, 1)) ?? vec3(1, 1, 1);
 }
 
+function getGroupJointIds(groupId: string): string[] {
+  const definition = state.rigDef.groups[groupId];
+  if (!definition) return [];
+  return definition.joints.slice();
+}
+
 function setGroupScaleValue(groupId: string, value: Vec3): Vec3 {
   const snapped = {
     x: clampGroupScaleValue(value.x),
@@ -1120,14 +1794,17 @@ function switchProfile(id: RigProfileId) {
   state = newState;
   markTimelineDirty();
   rigVisual.group.remove(jointRotationHelper);
+  rigVisual.group.remove(jointTranslateGroupHelper);
   disposeRigVisual(rigVisual);
   const profile = getProfile(id);
   rigVisual = buildRig(profile);
   rigVisual.group.add(jointRotationHelper);
+  rigVisual.group.add(jointTranslateGroupHelper);
   centroids = computeGroupCentroids(profile);
   jointChildren = buildJointChildren(profile);
   jointDescendantsCache = {};
   currentRotationDescendants = [];
+  clearJointSelection();
   selection = null;
   ui.refreshJointList();
   ui.updateTimeline();
@@ -1254,14 +1931,17 @@ function loadFromFile(file: File) {
       markTimelineDirty();
       stopPlayback();
       rigVisual.group.remove(jointRotationHelper);
+      rigVisual.group.remove(jointTranslateGroupHelper);
       disposeRigVisual(rigVisual);
       const profile = getProfile(state.rigProfileId);
       rigVisual = buildRig(profile);
       rigVisual.group.add(jointRotationHelper);
+      rigVisual.group.add(jointTranslateGroupHelper);
       centroids = computeGroupCentroids(profile);
       jointChildren = buildJointChildren(profile);
       jointDescendantsCache = {};
       currentRotationDescendants = [];
+      clearJointSelection();
       selection = null;
       ui.refreshJointList();
       ui.updateTimeline();
@@ -1324,6 +2004,13 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
         <button data-mode="translate">Move</button>
         <button data-mode="rotate">Rotate</button>
         <button data-mode="scale">Scale</button>
+      </div>
+      <div class="scale-readout" data-ctrl="scale-readout" hidden>
+        <span>Scale Δ</span>
+        <div class="scale-value">
+          <input type="number" step="0.01" min="0.1" data-ctrl="scale-value" value="1.00" />
+          <span aria-hidden="true">×</span>
+        </div>
       </div>
       <div class="selection-label" data-ctrl="selection-label">No selection</div>
     </section>
@@ -1433,6 +2120,19 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
   });
 
   const transformButtons = container.querySelectorAll<HTMLButtonElement>('[data-ctrl="transform-modes"] button');
+  const scaleReadout = container.querySelector<HTMLDivElement>('[data-ctrl="scale-readout"]')!;
+  const scaleValueInput = container.querySelector<HTMLInputElement>('[data-ctrl="scale-value"]')!;
+  scaleValueInput.addEventListener("change", () => {
+    const nextValue = parseFloat(scaleValueInput.value);
+    if (!Number.isFinite(nextValue)) {
+      refreshScaleReadout();
+      return;
+    }
+    const applied = applyScaleFactorFromInput(nextValue);
+    if (!applied) {
+      refreshScaleReadout();
+    }
+  });
   const syncTransformButtons = () => {
     transformButtons.forEach((btn) => {
       const mode = btn.dataset.mode as ("translate" | "rotate" | "scale" | undefined);
@@ -1451,7 +2151,7 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
 
   const selectionLabel = container.querySelector<HTMLDivElement>('[data-ctrl="selection-label"]')!;
   const groupScaleWrap = container.querySelector<HTMLDivElement>('[data-ctrl="group-scales"]')!;
-  type GroupInputEntry = { inputs: Record<"x" | "y" | "z", HTMLInputElement> };
+  type GroupInputEntry = { inputs: Record<"x" | "y" | "z", HTMLInputElement>; row: HTMLDivElement; label: string };
   const groupScaleInputs = new Map<string, GroupInputEntry>();
   let groupSignature = "";
 
@@ -1568,6 +2268,7 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
     Object.entries(state.rigDef.groups).forEach(([groupId, def]) => {
       const row = document.createElement("div");
       row.className = "group-scale-row";
+      row.dataset.groupId = groupId;
       const labelText = def.label || groupId;
       const title = document.createElement("div");
       title.className = "group-scale-title";
@@ -1605,6 +2306,15 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
       row.appendChild(axes);
       const actions = document.createElement("div");
       actions.className = "group-scale-actions";
+      const selectBtn = document.createElement("button");
+      selectBtn.textContent = "Select";
+      selectBtn.addEventListener("click", () => {
+        clearJointSelection();
+        selection = { kind: "group", id: groupId };
+        setTransformMode("scale");
+        updateSelection();
+      });
+      actions.appendChild(selectBtn);
       const resetBtn = document.createElement("button");
       resetBtn.textContent = "Reset";
       resetBtn.addEventListener("click", () => {
@@ -1615,7 +2325,7 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
       actions.appendChild(resetBtn);
       row.appendChild(actions);
       groupScaleWrap.appendChild(row);
-      groupScaleInputs.set(groupId, { inputs: axisInputs });
+      groupScaleInputs.set(groupId, { inputs: axisInputs, row, label: labelText });
       updateGroupRowValues(groupId, getGroupScaleValue(groupId));
     });
   };
@@ -1666,9 +2376,10 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
         const btn = document.createElement("button");
         btn.textContent = joint.name || joint.id;
         btn.dataset.jointId = joint.id;
-        btn.addEventListener("click", () => {
-          selection = { kind: "joint", id: joint.id };
-          updateSelection();
+        btn.addEventListener("click", (event: MouseEvent) => {
+          const toggle = event.metaKey || event.ctrlKey;
+          const additive = event.shiftKey && !toggle;
+          selectJoint(joint.id, { additive, toggle });
         });
         jointList.appendChild(btn);
       }
@@ -1680,7 +2391,16 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
       if (!selection) {
         selectionLabel.textContent = "No selection";
       } else if (selection.kind === "joint") {
-        selectionLabel.textContent = `Joint: ${selection.id}`;
+        const count = jointSelection.size || (selection ? 1 : 0);
+        if (count > 1) {
+          selectionLabel.textContent = `${count} joints selected`;
+        } else {
+          selectionLabel.textContent = `Joint: ${selection.id}`;
+        }
+      } else if (selection.kind === "group") {
+        const groupDef = state.rigDef.groups[selection.id];
+        const labelText = groupDef?.label || selection.id;
+        selectionLabel.textContent = `Group: ${labelText}`;
       } else if (selection.kind === "rigRoot") {
         selectionLabel.textContent = "Rig Root";
       } else {
@@ -1689,8 +2409,20 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
       Array.from(jointList.children).forEach((child) => {
         const btn = child as HTMLButtonElement;
         const jointId = btn.dataset.jointId;
-        btn.classList.toggle("active", selection?.kind === "joint" && jointId === selection.id);
+        btn.classList.toggle("active", Boolean(jointId && jointSelection.has(jointId)));
       });
+      groupScaleInputs.forEach((entry, groupId) => {
+        entry.row.classList.toggle("active", selection?.kind === "group" && selection.id === groupId);
+      });
+    },
+    updateScaleFactor: (value: number | null) => {
+      if (value == null) {
+        scaleReadout.hidden = true;
+        scaleValueInput.value = "1.00";
+        return;
+      }
+      scaleReadout.hidden = false;
+      scaleValueInput.value = value.toFixed(2);
     },
     updateTimeline: () => {
       fpsInput.value = String(state.timeline.fps);
@@ -1922,7 +2654,7 @@ function animate() {
     }
   }
   controls.update();
-  syncJointRotationHelper();
+  syncJointTransformHelpers();
   renderer.autoClear = true;
   renderer.render(scene, camera);
   renderer.autoClear = false;
