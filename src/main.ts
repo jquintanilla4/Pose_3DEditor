@@ -675,6 +675,13 @@ transformControls.addEventListener("objectChange", () => {
         changed = true;
       }
     }
+  } else if (selection.kind === "group") {
+    const targets = getGroupJointIds(selection.id);
+    if (transformMode === "rotate") {
+      changed = applyTargetsRotationDelta(targets);
+    } else if (transformMode === "translate") {
+      changed = applyTargetsTranslationDelta(targets);
+    }
   } else {
     selectionDirty = true;
     changed = true;
@@ -702,6 +709,10 @@ const viewportKeyHandler = (event: KeyboardEvent) => {
     if (selection?.kind === "joint" || jointSelection.size) {
       event.preventDefault();
       deselectAllJoints();
+    } else if (selection?.kind === "group") {
+      event.preventDefault();
+      selection = null;
+      updateSelection();
     }
     return;
   }
@@ -1294,10 +1305,6 @@ function endScaleGesture(event?: PointerEvent) {
 }
 
 function setTransformMode(mode: "translate" | "rotate" | "scale"): boolean {
-  if (selection?.kind === "group" && mode !== "scale") {
-    ui.showStatus("Groups can only be scaled.");
-    return false;
-  }
   if (scaleGestureState.active && mode !== "scale") {
     endScaleGesture();
   }
@@ -1310,6 +1317,8 @@ function setTransformMode(mode: "translate" | "rotate" | "scale"): boolean {
     if (selection) {
       if (selection.kind === "joint") {
         attachJointTransform(selection.id);
+      } else if (selection.kind === "group") {
+        attachGroupTransform();
       } else if (selection.kind === "rigRoot" || selection.kind === "videoPlane") {
         transformControls.setMode(mode);
       }
@@ -1358,6 +1367,8 @@ function updateSelection() {
   }
   if (selection.kind === "joint") {
     attachJointTransform(selection.id);
+  } else if (selection.kind === "group") {
+    attachGroupTransform();
   } else if (selection.kind === "rigRoot") {
     transformControls.attach(rigVisual.group);
     transformControls.setMode(transformMode);
@@ -1433,6 +1444,37 @@ function attachMultiJointTransform() {
   currentRotationDescendants = [];
 }
 
+function attachGroupTransform() {
+  if (!selection || selection.kind !== "group") {
+    transformControls.detach();
+    return;
+  }
+  const targets = getGroupJointIds(selection.id);
+  if (!targets.length) {
+    transformControls.detach();
+    currentRotationDescendants = [];
+    return;
+  }
+  if (transformMode === "rotate") {
+    if (!prepareMultiJointRotationHelper(targets)) {
+      transformControls.detach();
+      return;
+    }
+    transformControls.attach(jointRotationHelper);
+    transformControls.setMode("rotate");
+  } else if (transformMode === "translate") {
+    if (!prepareJointTranslateGroupHelper(targets)) {
+      transformControls.detach();
+      return;
+    }
+    transformControls.attach(jointTranslateGroupHelper);
+    transformControls.setMode("translate");
+  } else {
+    transformControls.detach();
+  }
+  currentRotationDescendants = [];
+}
+
 function prepareJointRotationHelper(mesh: THREE.Mesh, jointId: string) {
   jointRotationHelper.position.copy(mesh.position);
   jointRotationHelper.quaternion.identity();
@@ -1462,22 +1504,36 @@ function prepareJointTranslateGroupHelper(targets: string[]): boolean {
 
 function syncJointTransformHelpers() {
   if (transformControlsDragging) return;
-  if (!selection || selection.kind !== "joint") return;
+  if (!selection) return;
   if (transformMode === "rotate") {
-    const targets = getJointSelectionSnapshot();
-    if (!targets.length) return;
-    if (targets.length > 1) {
+    if (selection.kind === "joint") {
+      const targets = getJointSelectionSnapshot();
+      if (!targets.length) return;
+      if (targets.length > 1) {
+        computePivotFromTargets(targets, jointRotationHelper.position);
+      } else {
+        const mesh = rigVisual.joints[selection.id];
+        if (!mesh) return;
+        jointRotationHelper.position.copy(mesh.position);
+      }
+    } else if (selection.kind === "group") {
+      const targets = getGroupJointIds(selection.id);
+      if (!targets.length) return;
       computePivotFromTargets(targets, jointRotationHelper.position);
-    } else {
-      const mesh = rigVisual.joints[selection.id];
-      if (!mesh) return;
-      jointRotationHelper.position.copy(mesh.position);
     }
-  } else if (transformMode === "translate" && jointSelection.size > 1) {
-    const targets = getJointSelectionSnapshot();
-    if (!targets.length) return;
-    if (computePivotFromTargets(targets, jointTranslateGroupHelper.position)) {
-      jointTranslatePrevPosition.copy(jointTranslateGroupHelper.position);
+  } else if (transformMode === "translate") {
+    if (selection.kind === "joint" && jointSelection.size > 1) {
+      const targets = getJointSelectionSnapshot();
+      if (!targets.length) return;
+      if (computePivotFromTargets(targets, jointTranslateGroupHelper.position)) {
+        jointTranslatePrevPosition.copy(jointTranslateGroupHelper.position);
+      }
+    } else if (selection.kind === "group") {
+      const targets = getGroupJointIds(selection.id);
+      if (!targets.length) return;
+      if (computePivotFromTargets(targets, jointTranslateGroupHelper.position)) {
+        jointTranslatePrevPosition.copy(jointTranslateGroupHelper.position);
+      }
     }
   }
 }
@@ -1528,17 +1584,16 @@ function applyJointRotationDelta(): boolean {
   return changed;
 }
 
-function applyMultiJointTranslationDelta(): boolean {
-  if (!selection || selection.kind !== "joint") return false;
+function applyTargetsTranslationDelta(targets: string[]): boolean {
   if (transformMode !== "translate") return false;
-  if (jointSelection.size <= 1) return false;
+  if (!targets.length) return false;
   jointTranslateDelta.copy(jointTranslateGroupHelper.position).sub(jointTranslatePrevPosition);
   if (jointTranslateDelta.lengthSq() < 1e-10) {
     return false;
   }
   jointTranslatePrevPosition.copy(jointTranslateGroupHelper.position);
   let changed = false;
-  getJointSelectionSnapshot().forEach((jointId) => {
+  targets.forEach((jointId) => {
     const mesh = rigVisual.joints[jointId];
     if (!mesh) return;
     mesh.position.add(jointTranslateDelta);
@@ -1552,10 +1607,9 @@ function applyMultiJointTranslationDelta(): boolean {
   return changed;
 }
 
-function applyMultiJointRotationDelta(): boolean {
-  if (!selection || selection.kind !== "joint") return false;
+function applyTargetsRotationDelta(targets: string[]): boolean {
   if (transformMode !== "rotate") return false;
-  if (jointSelection.size <= 1) return false;
+  if (!targets.length) return false;
   const currentQuat = jointRotationHelper.quaternion;
   const prev = jointRotationPrevQuat;
   jointRotationPrevInverse.copy(prev).invert();
@@ -1565,7 +1619,6 @@ function applyMultiJointRotationDelta(): boolean {
   }
   prev.copy(currentQuat);
   let changed = false;
-  const targets = getJointSelectionSnapshot();
   targets.forEach((jointId) => {
     const pivotMesh = rigVisual.joints[jointId];
     if (!pivotMesh) return;
@@ -1586,6 +1639,18 @@ function applyMultiJointRotationDelta(): boolean {
     refreshBoneGeometryFromMeshes();
   }
   return changed;
+}
+
+function applyMultiJointTranslationDelta(): boolean {
+  if (!selection || selection.kind !== "joint") return false;
+  if (jointSelection.size <= 1) return false;
+  return applyTargetsTranslationDelta(getJointSelectionSnapshot());
+}
+
+function applyMultiJointRotationDelta(): boolean {
+  if (!selection || selection.kind !== "joint") return false;
+  if (jointSelection.size <= 1) return false;
+  return applyTargetsRotationDelta(getJointSelectionSnapshot());
 }
 
 function commitSelectionKey() {
