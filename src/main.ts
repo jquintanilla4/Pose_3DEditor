@@ -45,6 +45,8 @@ type RigVisual = {
   jointMaterials: Record<string, THREE.MeshStandardMaterial>;
   bones: [string, string][];
   boneGeometry: THREE.BufferGeometry;
+  masterControl: THREE.Mesh;
+  masterControlMaterial: THREE.MeshBasicMaterial;
 };
 
 type JointCentroids = Record<string, Vec3>;
@@ -197,6 +199,11 @@ const grid = new THREE.GridHelper(12, 24, 0x444444, 0x222222);
 scene.add(grid);
 const axes = new THREE.AxesHelper(0.5);
 scene.add(axes);
+
+const MASTER_CONTROL_COLOR = 0xff4d6d;
+const MASTER_CONTROL_SELECTED_COLOR = 0xffc857;
+const MASTER_CONTROL_OPACITY = 0.9;
+const MASTER_CONTROL_SELECTED_OPACITY = 1;
 
 class GateOverlay {
   overlayScene = new THREE.Scene();
@@ -759,8 +766,30 @@ function buildRig(profile: RigProfile): RigVisual {
     new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85 })
   );
   group.add(boneLines);
+  const masterRadius = computeMasterControlRadius(profile);
+  const masterGeo = new THREE.RingGeometry(Math.max(masterRadius - 0.04, 0.01), masterRadius, 48, 1);
+  const masterMat = new THREE.MeshBasicMaterial({
+    color: MASTER_CONTROL_COLOR,
+    transparent: true,
+    opacity: MASTER_CONTROL_OPACITY,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    depthTest: false
+  });
+  const masterControl = new THREE.Mesh(masterGeo, masterMat);
+  masterControl.name = "masterControl";
+  masterControl.rotation.x = -Math.PI / 2;
+  group.add(masterControl);
   scene.add(group);
-  return { group, joints, jointMaterials, bones: profile.bones.slice(), boneGeometry };
+  return {
+    group,
+    joints,
+    jointMaterials,
+    bones: profile.bones.slice(),
+    boneGeometry,
+    masterControl,
+    masterControlMaterial: masterMat
+  };
 }
 
 function disposeRigVisual(visual: RigVisual) {
@@ -806,6 +835,27 @@ function computeGroupCentroids(profile: RigProfile): JointCentroids {
   return centroids;
 }
 
+function computeMasterControlRadius(profile: RigProfile): number {
+  let minY = Infinity;
+  for (const pos of Object.values(profile.restPose)) {
+    if (!pos) continue;
+    minY = Math.min(minY, pos.y);
+  }
+  const footThreshold = Number.isFinite(minY) ? minY + 0.25 : Infinity;
+  let footRadius = 0;
+  let fallbackRadius = 0;
+  for (const pos of Object.values(profile.restPose)) {
+    if (!pos) continue;
+    const horizontal = Math.hypot(pos.x, pos.z);
+    if (pos.y <= footThreshold) {
+      footRadius = Math.max(footRadius, horizontal);
+    }
+    fallbackRadius = Math.max(fallbackRadius, horizontal);
+  }
+  const base = footRadius > 0 ? footRadius : fallbackRadius || 0.35;
+  return THREE.MathUtils.clamp(base + 0.1, 0.35, 1.25);
+}
+
 function onPointerDown(event: PointerEvent) {
   if (event.altKey && selection?.kind === "joint") {
     if (beginDepthBrush(event)) {
@@ -824,6 +874,12 @@ function onPointerDown(event: PointerEvent) {
       selectJoint(jointId, { additive: additiveSelection, toggle: toggleSelection });
       return;
     }
+  }
+
+  if (!toggleSelection && !additiveSelection && pickMasterControlUnderPointer(event)) {
+    event.preventDefault();
+    selectRigRoot();
+    return;
   }
 
   const gizmoHit = transformMode === "scale" && scaleGizmo.hitTest(raycaster);
@@ -922,6 +978,13 @@ function pickJointUnderPointer(event: PointerEvent): string | null {
   const intersects = raycaster.intersectObjects(targets, false);
   if (!intersects.length) return null;
   return intersects[0].object.name;
+}
+
+function pickMasterControlUnderPointer(event: PointerEvent): boolean {
+  updatePointerRay(event);
+  const control = rigVisual.masterControl;
+  if (!control.visible) return false;
+  return raycaster.intersectObject(control, false).length > 0;
 }
 
 type JointSelectionOptions = {
@@ -1287,6 +1350,7 @@ function updateSelection() {
     lastScaleSelectionKey = scaleKey;
     lastScaleFactor = 1;
   }
+  refreshMasterControlVisual();
   if (!selection) {
     ui.updateSelection();
     refreshScaleIndicators();
@@ -1305,6 +1369,13 @@ function updateSelection() {
   ui.updateSelection();
   ui.updateEaseControls();
   refreshScaleIndicators();
+}
+
+function refreshMasterControlVisual() {
+  const mat = rigVisual.masterControlMaterial;
+  const isSelected = selection?.kind === "rigRoot";
+  mat.color.set(isSelected ? MASTER_CONTROL_SELECTED_COLOR : MASTER_CONTROL_COLOR);
+  mat.opacity = isSelected ? MASTER_CONTROL_SELECTED_OPACITY : MASTER_CONTROL_OPACITY;
 }
 
 function attachJointTransform(jointId: string) {
