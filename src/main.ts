@@ -179,12 +179,15 @@ scene.add(transformControls.getHelper());
 
 const jointRotationHelper = new THREE.Object3D();
 const jointTranslateGroupHelper = new THREE.Object3D();
+const jointScaleHelper = new THREE.Object3D();
 const jointRotationPrevQuat = new THREE.Quaternion();
 const identityQuat = new THREE.Quaternion();
 const jointRotationDelta = new THREE.Quaternion();
 const jointRotationPrevInverse = new THREE.Quaternion();
 const jointTranslatePrevPosition = new THREE.Vector3();
 const jointTranslateDelta = new THREE.Vector3();
+const jointScalePrevScale = new THREE.Vector3(1, 1, 1);
+const jointScaleRatio = new THREE.Vector3();
 
 const ambient = new THREE.AmbientLight(0xffffff, 0.5);
 scene.add(ambient);
@@ -364,85 +367,6 @@ class GateOverlay {
 
 const overlay = new GateOverlay(renderer);
 
-class ScaleGizmo {
-  group = new THREE.Group();
-  private line: THREE.Line;
-  private arrow: THREE.Mesh;
-  private linePositions: THREE.BufferAttribute;
-  private arrowAxis = new THREE.Vector3(0, 1, 0);
-  private tempDir = new THREE.Vector3();
-  private tempQuat = new THREE.Quaternion();
-  private pickTargets: THREE.Object3D[] = [];
-
-  constructor() {
-    const lineGeo = new THREE.BufferGeometry();
-    lineGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
-    const lineMat = new THREE.LineDashedMaterial({
-      color: 0xffffff,
-      dashSize: 0.08,
-      gapSize: 0.05,
-      depthTest: false,
-      depthWrite: false,
-      transparent: true,
-      opacity: 0.9
-    });
-    this.line = new THREE.Line(lineGeo, lineMat);
-    this.line.computeLineDistances();
-    this.group.add(this.line);
-    this.linePositions = lineGeo.getAttribute("position") as THREE.BufferAttribute;
-
-    const coneGeo = new THREE.ConeGeometry(0.04, 0.12, 14);
-    coneGeo.translate(0, -0.06, 0);
-    const coneMat = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false, depthWrite: false });
-    this.arrow = new THREE.Mesh(coneGeo, coneMat);
-    this.group.add(this.arrow);
-    this.pickTargets = [this.line, this.arrow];
-
-    this.group.visible = false;
-    this.group.renderOrder = 1000;
-  }
-
-  update(start: THREE.Vector3, end: THREE.Vector3) {
-    this.linePositions.setXYZ(0, start.x, start.y, start.z);
-    this.linePositions.setXYZ(1, end.x, end.y, end.z);
-    this.linePositions.needsUpdate = true;
-    this.line.computeLineDistances();
-
-    const dir = this.tempDir.copy(end).sub(start);
-    const lengthSq = dir.lengthSq();
-    if (lengthSq > 1e-6) {
-      dir.normalize();
-      this.tempQuat.setFromUnitVectors(this.arrowAxis, dir);
-      this.arrow.quaternion.copy(this.tempQuat);
-      this.arrow.visible = true;
-    } else {
-      this.arrow.visible = false;
-    }
-    this.arrow.position.copy(end);
-  }
-
-  show(start: THREE.Vector3, end: THREE.Vector3) {
-    this.update(start, end);
-    this.group.visible = true;
-  }
-
-  hide() {
-    this.group.visible = false;
-  }
-
-  isVisible(): boolean {
-    return this.group.visible;
-  }
-
-  hitTest(raycaster: THREE.Raycaster): boolean {
-    if (!this.group.visible) return false;
-    return raycaster.intersectObjects(this.pickTargets, false).length > 0;
-  }
-}
-
-const scaleGizmo = new ScaleGizmo();
-scene.add(scaleGizmo.group);
-
 let state: EditorState = createEditorState(DEFAULT_PROFILE_ID);
 let selection: Selection = null;
 const jointSelection = new Set<string>();
@@ -460,6 +384,7 @@ let videoRuntime: VideoRuntime | null = null;
 let rigVisual = buildRig(getProfile(state.rigProfileId));
 rigVisual.group.add(jointRotationHelper);
 rigVisual.group.add(jointTranslateGroupHelper);
+rigVisual.group.add(jointScaleHelper);
 let centroids = computeGroupCentroids(getProfile(state.rigProfileId));
 let jointChildren = buildJointChildren(getProfile(state.rigProfileId));
 let jointDescendantsCache: Record<string, string[]> = {};
@@ -584,31 +509,8 @@ const depthBrushOffset = new THREE.Vector3();
 
 const SCALE_MIN_FACTOR = 0.1;
 const SCALE_MAX_FACTOR = 5;
-const SCALE_MIN_DISTANCE = 0.01;
-
-const scaleGestureState = {
-  active: false,
-  pointerId: -1,
-  targets: [] as string[],
-  pivotLocal: new THREE.Vector3(),
-  pivotWorld: new THREE.Vector3(),
-  plane: new THREE.Plane(),
-  startPoint: new THREE.Vector3(),
-  currentPoint: new THREE.Vector3(),
-  startDistance: 1,
-  factor: 1,
-  baseFactor: 1,
-  initialPositions: new Map<string, THREE.Vector3>()
-};
-const scalePlaneNormal = new THREE.Vector3();
 const scaleTempVec = new THREE.Vector3();
 const scaleManualPivotLocal = new THREE.Vector3();
-const scalePreviewPivotLocal = new THREE.Vector3();
-const scalePreviewPivotWorld = new THREE.Vector3();
-const scalePreviewEnd = new THREE.Vector3();
-const scalePreviewDir = new THREE.Vector3();
-let lastScaleFactor = 1;
-let lastScaleSelectionKey: string | null = null;
 
 const timelineUI = createTimelineBar(app);
 ui = buildPanel(panel, timelineUI);
@@ -633,15 +535,7 @@ renderer.domElement.addEventListener("pointermove", onPointerMove);
 renderer.domElement.addEventListener("pointerup", onPointerUp);
 renderer.domElement.addEventListener("pointerleave", onPointerUp);
 renderer.domElement.addEventListener("pointercancel", onPointerUp);
-renderer.domElement.addEventListener("lostpointercapture", (event: PointerEvent) => {
-  if (scaleGestureState.active && event.pointerId === scaleGestureState.pointerId) {
-    endScaleGesture();
-  }
-});
 const handleGlobalPointerEnd = (event: PointerEvent) => {
-  if (scaleGestureState.active && event.pointerId === scaleGestureState.pointerId) {
-    endScaleGesture(event);
-  }
   if (depthBrushState.active && event.pointerId === depthBrushState.pointerId) {
     endDepthBrush(event);
   }
@@ -649,7 +543,6 @@ const handleGlobalPointerEnd = (event: PointerEvent) => {
 window.addEventListener("pointerup", handleGlobalPointerEnd);
 window.addEventListener("pointercancel", handleGlobalPointerEnd);
 window.addEventListener("blur", () => {
-  endScaleGesture();
   endDepthBrush();
 });
 
@@ -657,6 +550,9 @@ transformControls.addEventListener("dragging-changed", (event: TransformControls
   const isDragging = Boolean(event.value);
   transformControlsDragging = isDragging;
   controls.enabled = !isDragging;
+  if (!isDragging) {
+    syncJointTransformHelpers();
+  }
 });
 
 transformControls.addEventListener("objectChange", () => {
@@ -674,6 +570,8 @@ transformControls.addEventListener("objectChange", () => {
         refreshBoneGeometryFromMeshes();
         changed = true;
       }
+    } else if (transformMode === "scale") {
+      changed = applyTargetsScaleDelta(getJointSelectionSnapshot());
     }
   } else if (selection.kind === "group") {
     const targets = getGroupJointIds(selection.id);
@@ -681,6 +579,8 @@ transformControls.addEventListener("objectChange", () => {
       changed = applyTargetsRotationDelta(targets);
     } else if (transformMode === "translate") {
       changed = applyTargetsTranslationDelta(targets);
+    } else if (transformMode === "scale") {
+      changed = applyTargetsScaleDelta(targets);
     }
   } else {
     selectionDirty = true;
@@ -699,12 +599,6 @@ const viewportKeyHandler = (event: KeyboardEvent) => {
   if (event.metaKey || event.ctrlKey || event.altKey) return;
   if (isTextInputTarget(event.target)) return;
   const key = event.key.toLowerCase();
-  if (scaleGestureState.active) {
-    if (key === "escape") {
-      endScaleGesture();
-    }
-    return;
-  }
   if (key === "escape") {
     if (selection?.kind === "joint" || jointSelection.size) {
       event.preventDefault();
@@ -873,7 +767,7 @@ function onPointerDown(event: PointerEvent) {
       return;
     }
   }
-  if (depthBrushState.active || scaleGestureState.active) return;
+  if (depthBrushState.active) return;
 
   const jointId = pickJointUnderPointer(event);
   const toggleSelection = event.metaKey || event.ctrlKey;
@@ -893,32 +787,15 @@ function onPointerDown(event: PointerEvent) {
     return;
   }
 
-  const gizmoHit = transformMode === "scale" && scaleGizmo.hitTest(raycaster);
-  const jointSelectionHit = selection?.kind === "joint" && jointId ? jointSelection.has(jointId) : false;
-  const canScale =
-    transformMode === "scale" &&
-    selection &&
-    (selection.kind === "group" || gizmoHit || jointSelectionHit);
-
-  if (canScale && beginScaleGesture(event)) {
-    return;
-  }
 }
 
 function onPointerMove(event: PointerEvent) {
-  if (scaleGestureState.active && scaleGestureState.pointerId === event.pointerId) {
-    updateScaleGesture(event);
-    return;
-  }
   if (depthBrushState.active && depthBrushState.pointerId === event.pointerId) {
     updateDepthBrush(event);
   }
 }
 
 function onPointerUp(event: PointerEvent) {
-  if (scaleGestureState.active && scaleGestureState.pointerId === event.pointerId) {
-    endScaleGesture(event);
-  }
   if (depthBrushState.active && depthBrushState.pointerId === event.pointerId) {
     endDepthBrush(event);
   }
@@ -1076,19 +953,6 @@ function getSelectionJointTargets(): string[] {
   return [];
 }
 
-function getScaleSelectionKey(): string | null {
-  if (!selection) return null;
-  if (selection.kind === "joint") {
-    const ids = getJointSelectionSnapshot();
-    if (!ids.length) return null;
-    return `joint:${ids.slice().sort().join(",")}`;
-  }
-  if (selection.kind === "group") {
-    return `group:${selection.id}`;
-  }
-  return null;
-}
-
 function computePivotFromTargets(targets: string[], out: THREE.Vector3): boolean {
   out.set(0, 0, 0);
   let count = 0;
@@ -1103,217 +967,57 @@ function computePivotFromTargets(targets: string[], out: THREE.Vector3): boolean
   return true;
 }
 
-function copyRigLocalToWorld(local: THREE.Vector3, target: THREE.Vector3): THREE.Vector3 {
-  rigVisual.group.updateMatrixWorld(true);
-  target.copy(local);
-  return rigVisual.group.localToWorld(target);
-}
-
-function refreshScaleReadout() {
+function refreshScaleUI() {
   if (!ui) return;
-  if (
+  const visible =
     transformMode === "scale" &&
     selection &&
-    (selection.kind === "joint" || selection.kind === "group")
-  ) {
-    const activeValue = scaleGestureState.baseFactor * scaleGestureState.factor;
-    const value = scaleGestureState.active ? activeValue : lastScaleFactor;
-    ui.updateScaleFactor(value);
-  } else {
-    ui.updateScaleFactor(null);
-  }
+    (selection.kind === "joint" || selection.kind === "group");
+  ui.updateScaleFactor(visible ? 1 : null);
 }
 
-function refreshScaleIndicators() {
-  updateScaleGizmoPreview();
-  refreshScaleReadout();
+function resetJointScaleHelper() {
+  jointScaleHelper.quaternion.identity();
+  jointScaleHelper.rotation.set(0, 0, 0);
+  jointScaleHelper.scale.set(1, 1, 1);
+  jointScalePrevScale.set(1, 1, 1);
 }
 
-function updateScaleGizmoPreview() {
-  if (scaleGestureState.active) return;
-  if (transformMode !== "scale") {
-    scaleGizmo.hide();
-    return;
-  }
-  if (!selection || (selection.kind !== "joint" && selection.kind !== "group")) {
-    scaleGizmo.hide();
-    return;
-  }
-  const targets = getSelectionJointTargets();
-  if (!targets.length) {
-    scaleGizmo.hide();
-    return;
-  }
-  if (!computePivotFromTargets(targets, scalePreviewPivotLocal)) {
-    scaleGizmo.hide();
-    return;
-  }
-  copyRigLocalToWorld(scalePreviewPivotLocal, scalePreviewPivotWorld);
-  scalePreviewDir.copy(camera.position).sub(scalePreviewPivotWorld);
-  let distance = scalePreviewDir.length();
-  if (distance < 1e-3) {
-    scalePreviewDir.set(0, 1, 0);
-    distance = 1;
-  } else {
-    scalePreviewDir.multiplyScalar(1 / distance);
-  }
-  const handleLength = THREE.MathUtils.clamp(distance * 0.15, 0.2, 0.8);
-  scalePreviewEnd.copy(scalePreviewDir).multiplyScalar(handleLength).add(scalePreviewPivotWorld);
-  scaleGizmo.show(scalePreviewPivotWorld, scalePreviewEnd);
-}
-
-function beginScaleGesture(event: PointerEvent): boolean {
-  if (!selection || (selection.kind !== "joint" && selection.kind !== "group")) return false;
-  const targets = getSelectionJointTargets();
+function prepareJointScaleHelper(targets: string[]): boolean {
   if (!targets.length) return false;
-  if (!computePivotFromTargets(targets, scaleGestureState.pivotLocal)) return false;
-  copyRigLocalToWorld(scaleGestureState.pivotLocal, scaleGestureState.pivotWorld);
-
-  updatePointerRay(event);
-  camera.getWorldDirection(scalePlaneNormal);
-  scaleGestureState.plane.setFromNormalAndCoplanarPoint(scalePlaneNormal, scaleGestureState.pivotWorld);
-  const hit = raycaster.ray.intersectPlane(scaleGestureState.plane, scaleGestureState.currentPoint);
-  if (!hit) return false;
-
-  scaleGestureState.startPoint.copy(scaleGestureState.currentPoint);
-  const distance = scaleGestureState.pivotWorld.distanceTo(scaleGestureState.currentPoint);
-  scaleGestureState.startDistance = distance;
-  scaleGestureState.targets = [];
-  scaleGestureState.initialPositions.clear();
-  for (const jointId of targets) {
-    const mesh = rigVisual.joints[jointId];
-    if (!mesh) continue;
-    scaleGestureState.targets.push(jointId);
-    scaleGestureState.initialPositions.set(jointId, mesh.position.clone());
-  }
-  if (!scaleGestureState.targets.length) return false;
-
-  scaleGestureState.active = true;
-  scaleGestureState.pointerId = event.pointerId;
-  scaleGestureState.factor = 1;
-  scaleGestureState.baseFactor = lastScaleFactor;
-  controls.enabled = false;
-  transformControlsToggle.enabled = false;
-  renderer.domElement.setPointerCapture(event.pointerId);
-  scaleGizmo.show(scaleGestureState.pivotWorld, scaleGestureState.currentPoint);
-  refreshScaleReadout();
+  if (!computePivotFromTargets(targets, jointScaleHelper.position)) return false;
+  resetJointScaleHelper();
   return true;
-}
-
-function applyScaleFactor(factor: number) {
-  if (!scaleGestureState.active) return;
-  const pivot = scaleGestureState.pivotLocal;
-  scaleGestureState.factor = factor;
-  const combinedFactor = scaleGestureState.baseFactor * factor;
-  lastScaleFactor = combinedFactor;
-  for (const jointId of scaleGestureState.targets) {
-    const mesh = rigVisual.joints[jointId];
-    const original = scaleGestureState.initialPositions.get(jointId);
-    if (!mesh || !original) continue;
-    scaleTempVec.copy(original).sub(pivot).multiplyScalar(factor).add(pivot);
-    mesh.position.copy(scaleTempVec);
-    dirtyJointIds.add(jointId);
-  }
-  selectionDirty = true;
-  refreshBoneGeometryFromMeshes();
-  refreshScaleReadout();
 }
 
 function scaleSelectionByRatio(factor: number): boolean {
   if (!selection || (selection.kind !== "joint" && selection.kind !== "group")) return false;
+  if (transformMode !== "scale") return false;
   if (!Number.isFinite(factor) || factor <= 0) return false;
+  const clamped = THREE.MathUtils.clamp(factor, SCALE_MIN_FACTOR, SCALE_MAX_FACTOR);
   const targets = getSelectionJointTargets();
   if (!targets.length) return false;
   if (!computePivotFromTargets(targets, scaleManualPivotLocal)) return false;
+  let changed = false;
   for (const jointId of targets) {
     const mesh = rigVisual.joints[jointId];
     if (!mesh) continue;
-    scaleTempVec.copy(mesh.position).sub(scaleManualPivotLocal).multiplyScalar(factor).add(scaleManualPivotLocal);
+    scaleTempVec.copy(mesh.position).sub(scaleManualPivotLocal).multiplyScalar(clamped).add(scaleManualPivotLocal);
     mesh.position.copy(scaleTempVec);
     dirtyJointIds.add(jointId);
+    changed = true;
   }
-  selectionDirty = true;
-  refreshBoneGeometryFromMeshes();
-  return true;
-}
-
-function applyScaleFactorFromInput(nextValue: number): boolean {
-  if (!selection || (selection.kind !== "joint" && selection.kind !== "group")) return false;
-  if (transformMode !== "scale") return false;
-  if (!Number.isFinite(nextValue)) return false;
-  if (scaleGestureState.active) {
-    endScaleGesture();
+  if (changed) {
+    selectionDirty = true;
+    refreshBoneGeometryFromMeshes();
   }
-  const targetFactor = Math.max(SCALE_MIN_FACTOR, nextValue);
-  const currentFactor = lastScaleFactor || 1;
-  if (!Number.isFinite(currentFactor) || currentFactor <= 0) return false;
-  const ratio = targetFactor / currentFactor;
-  if (!Number.isFinite(ratio) || ratio <= 0) return false;
-  if (Math.abs(ratio - 1) < 1e-4) {
-    lastScaleFactor = targetFactor;
-    refreshScaleReadout();
-    return true;
-  }
-  const updated = scaleSelectionByRatio(ratio);
-  if (!updated) return false;
-  lastScaleFactor = targetFactor;
-  if (state.autoKey) {
-    commitSelectionKey();
-    selectionDirty = false;
-  } else {
-    ui.showStatus("Transform pending — click Key Selected to store");
-  }
-  refreshScaleIndicators();
-  return true;
-}
-
-function updateScaleGesture(event: PointerEvent) {
-  if (!scaleGestureState.active || event.pointerId !== scaleGestureState.pointerId) return;
-  updatePointerRay(event);
-  const hit = raycaster.ray.intersectPlane(scaleGestureState.plane, scaleGestureState.currentPoint);
-  if (!hit) return;
-  const distance = scaleGestureState.pivotWorld.distanceTo(scaleGestureState.currentPoint);
-  const ratio = (distance + SCALE_MIN_DISTANCE) / (scaleGestureState.startDistance + SCALE_MIN_DISTANCE);
-  const factor = THREE.MathUtils.clamp(ratio, SCALE_MIN_FACTOR, SCALE_MAX_FACTOR);
-  applyScaleFactor(factor);
-  scaleGizmo.update(scaleGestureState.pivotWorld, scaleGestureState.currentPoint);
-}
-
-function endScaleGesture(event?: PointerEvent) {
-  if (!scaleGestureState.active) return;
-  if (event && event.pointerId !== scaleGestureState.pointerId) return;
-  if (scaleGestureState.pointerId !== -1 && renderer.domElement.hasPointerCapture(scaleGestureState.pointerId)) {
-    renderer.domElement.releasePointerCapture(scaleGestureState.pointerId);
-  }
-  scaleGestureState.active = false;
-  scaleGestureState.pointerId = -1;
-  scaleGestureState.factor = 1;
-  scaleGestureState.baseFactor = 1;
-  scaleGestureState.targets = [];
-  scaleGestureState.initialPositions.clear();
-  controls.enabled = true;
-  transformControlsToggle.enabled = true;
-  if (selectionDirty) {
-    if (state.autoKey) {
-      commitSelectionKey();
-      selectionDirty = false;
-    } else {
-      ui.showStatus("Transform pending — click Key Selected to store");
-    }
-  }
-  refreshScaleIndicators();
+  return changed;
 }
 
 function setTransformMode(mode: "translate" | "rotate" | "scale"): boolean {
-  if (scaleGestureState.active && mode !== "scale") {
-    endScaleGesture();
-  }
   const changed = transformMode !== mode;
   if (changed) {
     transformMode = mode;
-    if (mode === "scale") {
-      lastScaleFactor = 1;
-    }
     if (selection) {
       if (selection.kind === "joint") {
         attachJointTransform(selection.id);
@@ -1327,7 +1031,7 @@ function setTransformMode(mode: "translate" | "rotate" | "scale"): boolean {
       ui.updateTransformMode();
     }
   }
-  refreshScaleIndicators();
+  refreshScaleUI();
   return true;
 }
 
@@ -1344,7 +1048,6 @@ function selectVideoPlane() {
 }
 
 function updateSelection() {
-  endScaleGesture();
   selectionDirty = false;
   dirtyJointIds.clear();
   transformControls.detach();
@@ -1354,15 +1057,10 @@ function updateSelection() {
   for (const [jointId, mat] of Object.entries(rigVisual.jointMaterials)) {
     mat.color.set(jointSelection.has(jointId) ? 0xffc857 : 0x4cc9f0);
   }
-  const scaleKey = getScaleSelectionKey();
-  if (scaleKey !== lastScaleSelectionKey) {
-    lastScaleSelectionKey = scaleKey;
-    lastScaleFactor = 1;
-  }
   refreshMasterControlVisual();
   if (!selection) {
     ui.updateSelection();
-    refreshScaleIndicators();
+    refreshScaleUI();
     return;
   }
   if (selection.kind === "joint") {
@@ -1379,7 +1077,7 @@ function updateSelection() {
   ui.updateTransformMode();
   ui.updateSelection();
   ui.updateEaseControls();
-  refreshScaleIndicators();
+  refreshScaleUI();
 }
 
 function refreshMasterControlVisual() {
@@ -1407,6 +1105,16 @@ function attachJointTransform(jointId: string) {
   } else if (transformMode === "translate") {
     transformControls.attach(mesh);
     transformControls.setMode("translate");
+    currentRotationDescendants = [];
+  } else if (transformMode === "scale") {
+    const targets = getJointSelectionSnapshot();
+    if (!prepareJointScaleHelper(targets)) {
+      transformControls.detach();
+      currentRotationDescendants = [];
+      return;
+    }
+    transformControls.attach(jointScaleHelper);
+    transformControls.setMode("scale");
     currentRotationDescendants = [];
   } else {
     transformControls.detach();
@@ -1438,6 +1146,13 @@ function attachMultiJointTransform() {
     }
     transformControls.attach(jointTranslateGroupHelper);
     transformControls.setMode("translate");
+  } else if (transformMode === "scale") {
+    if (!prepareJointScaleHelper(targets)) {
+      transformControls.detach();
+      return;
+    }
+    transformControls.attach(jointScaleHelper);
+    transformControls.setMode("scale");
   } else {
     transformControls.detach();
   }
@@ -1469,6 +1184,13 @@ function attachGroupTransform() {
     }
     transformControls.attach(jointTranslateGroupHelper);
     transformControls.setMode("translate");
+  } else if (transformMode === "scale") {
+    if (!prepareJointScaleHelper(targets)) {
+      transformControls.detach();
+      return;
+    }
+    transformControls.attach(jointScaleHelper);
+    transformControls.setMode("scale");
   } else {
     transformControls.detach();
   }
@@ -1533,6 +1255,20 @@ function syncJointTransformHelpers() {
       if (!targets.length) return;
       if (computePivotFromTargets(targets, jointTranslateGroupHelper.position)) {
         jointTranslatePrevPosition.copy(jointTranslateGroupHelper.position);
+      }
+    }
+  } else if (transformMode === "scale") {
+    if (selection.kind === "joint") {
+      const targets = getJointSelectionSnapshot();
+      if (!targets.length) return;
+      if (computePivotFromTargets(targets, jointScaleHelper.position)) {
+        resetJointScaleHelper();
+      }
+    } else if (selection.kind === "group") {
+      const targets = getGroupJointIds(selection.id);
+      if (!targets.length) return;
+      if (computePivotFromTargets(targets, jointScaleHelper.position)) {
+        resetJointScaleHelper();
       }
     }
   }
@@ -1633,6 +1369,53 @@ function applyTargetsRotationDelta(targets: string[]): boolean {
       dirtyJointIds.add(childId);
       changed = true;
     });
+  });
+  if (changed) {
+    selectionDirty = true;
+    refreshBoneGeometryFromMeshes();
+  }
+  return changed;
+}
+
+function applyTargetsScaleDelta(targets: string[]): boolean {
+  if (transformMode !== "scale") return false;
+  if (!targets.length) return false;
+  const current = jointScaleHelper.scale;
+  const limitComponent = (value: number) => {
+    if (!Number.isFinite(value)) return 1;
+    const magnitude = Math.min(Math.max(Math.abs(value), SCALE_MIN_FACTOR), SCALE_MAX_FACTOR);
+    return value < 0 ? -magnitude : magnitude;
+  };
+  current.set(limitComponent(current.x), limitComponent(current.y), limitComponent(current.z));
+  const prev = jointScalePrevScale;
+  const safeComponent = (currentValue: number, prevValue: number) => {
+    const denom = Math.abs(prevValue) < 1e-6 ? (prevValue < 0 ? -1 : 1) : prevValue;
+    const ratio = currentValue / denom;
+    return Number.isFinite(ratio) ? ratio : 1;
+  };
+  jointScaleRatio.set(
+    safeComponent(current.x, prev.x),
+    safeComponent(current.y, prev.y),
+    safeComponent(current.z, prev.z)
+  );
+  if (
+    Math.abs(jointScaleRatio.x - 1) < 1e-4 &&
+    Math.abs(jointScaleRatio.y - 1) < 1e-4 &&
+    Math.abs(jointScaleRatio.z - 1) < 1e-4
+  ) {
+    return false;
+  }
+  prev.copy(current);
+  const pivot = jointScaleHelper.position;
+  let changed = false;
+  targets.forEach((jointId) => {
+    const mesh = rigVisual.joints[jointId];
+    if (!mesh) return;
+    scaleTempVec.copy(mesh.position).sub(pivot);
+    scaleTempVec.multiply(jointScaleRatio);
+    mesh.position.copy(pivot).add(scaleTempVec);
+    dirtyJointIds.add(jointId);
+    changed = true;
   });
   if (changed) {
     selectionDirty = true;
@@ -1799,7 +1582,7 @@ function requestPoseUpdate() {
   updateRig(currentFrame);
   updateVideoPlane(currentFrame);
   ui.updateTimeline();
-  refreshScaleIndicators();
+  refreshScaleUI();
 }
 
 function updateFrame(frame: number) {
@@ -1814,7 +1597,7 @@ function updateFrame(frame: number) {
   ui.updateTimeline();
   ui.updateGroupControls();
   ui.updateEaseControls();
-  refreshScaleIndicators();
+  refreshScaleUI();
 }
 
 function toggleAutoKey() {
@@ -1997,11 +1780,13 @@ function switchProfile(id: RigProfileId) {
   markTimelineDirty();
   rigVisual.group.remove(jointRotationHelper);
   rigVisual.group.remove(jointTranslateGroupHelper);
+  rigVisual.group.remove(jointScaleHelper);
   disposeRigVisual(rigVisual);
   const profile = getProfile(id);
   rigVisual = buildRig(profile);
   rigVisual.group.add(jointRotationHelper);
   rigVisual.group.add(jointTranslateGroupHelper);
+  rigVisual.group.add(jointScaleHelper);
   centroids = computeGroupCentroids(profile);
   jointChildren = buildJointChildren(profile);
   jointDescendantsCache = {};
@@ -2134,11 +1919,13 @@ function loadFromFile(file: File) {
       stopPlayback();
       rigVisual.group.remove(jointRotationHelper);
       rigVisual.group.remove(jointTranslateGroupHelper);
+      rigVisual.group.remove(jointScaleHelper);
       disposeRigVisual(rigVisual);
       const profile = getProfile(state.rigProfileId);
       rigVisual = buildRig(profile);
       rigVisual.group.add(jointRotationHelper);
       rigVisual.group.add(jointTranslateGroupHelper);
+      rigVisual.group.add(jointScaleHelper);
       centroids = computeGroupCentroids(profile);
       jointChildren = buildJointChildren(profile);
       jointDescendantsCache = {};
@@ -2344,12 +2131,19 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
   scaleValueInput.addEventListener("change", () => {
     const nextValue = parseFloat(scaleValueInput.value);
     if (!Number.isFinite(nextValue)) {
-      refreshScaleReadout();
+      scaleValueInput.value = "1.00";
       return;
     }
-    const applied = applyScaleFactorFromInput(nextValue);
+    const applied = scaleSelectionByRatio(nextValue);
+    scaleValueInput.value = "1.00";
     if (!applied) {
-      refreshScaleReadout();
+      return;
+    }
+    if (state.autoKey) {
+      commitSelectionKey();
+      selectionDirty = false;
+    } else {
+      ui.showStatus("Transform pending — click Key Selected to store");
     }
   });
   const syncTransformButtons = () => {
