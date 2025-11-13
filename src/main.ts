@@ -1623,14 +1623,6 @@ function stopPlayback() {
   ui.updatePlaybackControls();
 }
 
-function togglePlayback() {
-  if (isPlaying) {
-    stopPlayback();
-  } else {
-    startPlayback();
-  }
-}
-
 function toggleLoopPlayback() {
   loopPlayback = !loopPlayback;
   ui.updatePlaybackControls();
@@ -1946,33 +1938,70 @@ function loadFromFile(file: File) {
 
 function buildPanel(container: HTMLElement, timelineBar: TimelineBarController): UIController {
   container.innerHTML = `
+    <section class="sequence-section">
+      <header>Sequence Settings</header>
+      <div class="field-row">
+        <label>Width <input type="number" data-ctrl="out-width" min="1" /></label>
+        <label>Height <input type="number" data-ctrl="out-height" min="1" /></label>
+      </div>
+      <div class="field-row">
+        <label>Pixel Aspect <input type="number" step="0.01" data-ctrl="out-pa" /></label>
+        <label>Render Scale <input type="number" step="0.1" data-ctrl="out-scale" /></label>
+      </div>
+      <label>Overscan % <input type="number" step="0.5" data-ctrl="out-overscan" /></label>
+      <div class="sequence-subgroup">
+        <div class="sequence-subgroup-title">Timeline</div>
+        <div class="field-row">
+          <label>FPS <input type="number" data-ctrl="fps" min="1" /></label>
+          <label>Frames <input type="number" data-ctrl="frames" min="1" /></label>
+        </div>
+      </div>
+      <div class="sequence-subgroup">
+        <div class="sequence-subgroup-title">Camera</div>
+        <label>FOV <input type="number" step="0.1" data-ctrl="camera-fov" /></label>
+        <div class="button-row sequence-camera-buttons">
+          <button data-ctrl="camera-preview">Preview</button>
+          <button data-ctrl="camera-key">Key Camera</button>
+        </div>
+      </div>
+      <div class="guides" data-ctrl="guides"></div>
+      <div class="status" data-ctrl="status">Ready.</div>
+    </section>
     <section>
       <header>Rig</header>
       <label>Profile
         <select data-ctrl="profile"></select>
       </label>
       <div class="button-row">
-        <button data-ctrl="select-rig">Rig Root</button>
-        <button data-ctrl="select-video">Video Plane</button>
+        <button data-ctrl="select-rig">Select Master Joint</button>
       </div>
     </section>
-    <section>
-      <header>Timeline</header>
-      <div class="field-row">
-        <label>FPS <input type="number" data-ctrl="fps" min="1" /></label>
-        <label>Frames <input type="number" data-ctrl="frames" min="1" /></label>
+    <section class="video-plane-section">
+      <header>Video Plane</header>
+      <div class="button-row video-plane-select-row">
+        <button data-ctrl="select-video">Select Video Plane</button>
       </div>
-      <label>Frame
-        <input type="range" min="0" data-ctrl="frame-slider" />
-        <input type="number" min="0" data-ctrl="frame-input" />
+      <input class="video-plane-file" type="file" accept="video/*" data-ctrl="video-input" />
+      <div class="button-row video-plane-action-row">
+        <button data-ctrl="match-video">Match Video</button>
+        <button data-ctrl="clear-video">Clear</button>
+      </div>
+      <label class="video-plane-lock"><span>Lock to camera</span><input type="checkbox" data-ctrl="lock-video" /></label>
+      <label class="video-plane-offset">
+        <span>Time Offset (s)</span>
+        <input
+          type="number"
+          step="0.05"
+          data-ctrl="video-offset"
+          title="Shift the video playback earlier or later so it lines up with your poses."
+        />
       </label>
+    </section>
+    <section>
+      <header>Animation</header>
       <div class="button-row">
         <button data-ctrl="toggle-autokey"></button>
-        <button data-ctrl="key-selection">Key Selected</button>
-      </div>
-      <div class="button-row playback-row">
-        <button data-ctrl="playback-toggle">Play</button>
-        <button data-ctrl="loop-toggle">Loop</button>
+        <button data-ctrl="key-selection" disabled>Set Manual Key</button>
       </div>
       <div class="field-row ease-row">
         <label>Ease
@@ -1987,7 +2016,7 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
       </div>
       <div class="ease-status" data-ctrl="ease-status">Select something to edit easing.</div>
     </section>
-    <section>
+    <section class="transform-section">
       <header>Transform</header>
       <div class="button-row" data-ctrl="transform-modes">
         <button data-mode="translate">Move</button>
@@ -2010,38 +2039,6 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
     <section>
       <header>Groups</header>
       <div class="group-scale-list" data-ctrl="group-scales"></div>
-    </section>
-    <section>
-      <header>Video Plane</header>
-      <input type="file" accept="video/*" data-ctrl="video-input" />
-      <div class="button-row">
-        <button data-ctrl="match-video">Match Video</button>
-        <button data-ctrl="clear-video">Clear</button>
-      </div>
-      <label><input type="checkbox" data-ctrl="lock-video" /> Lock to camera</label>
-      <label>Time Offset (s) <input type="number" step="0.05" data-ctrl="video-offset" /></label>
-    </section>
-    <section>
-      <header>Camera</header>
-      <label>FOV <input type="number" step="0.1" data-ctrl="camera-fov" /></label>
-      <div class="button-row">
-        <button data-ctrl="camera-preview">Preview</button>
-        <button data-ctrl="camera-key">Key Camera</button>
-      </div>
-    </section>
-    <section>
-      <header>Output</header>
-      <div class="field-row">
-        <label>Width <input type="number" data-ctrl="out-width" min="1" /></label>
-        <label>Height <input type="number" data-ctrl="out-height" min="1" /></label>
-      </div>
-      <div class="field-row">
-        <label>Pixel Aspect <input type="number" step="0.01" data-ctrl="out-pa" /></label>
-        <label>Render Scale <input type="number" step="0.1" data-ctrl="out-scale" /></label>
-      </div>
-      <label>Overscan % <input type="number" step="0.5" data-ctrl="out-overscan" /></label>
-      <div class="guides" data-ctrl="guides"></div>
-      <div class="status" data-ctrl="status">Ready.</div>
     </section>
   `;
 
@@ -2093,19 +2090,13 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
 
   const fpsInput = container.querySelector<HTMLInputElement>('[data-ctrl="fps"]')!;
   const framesInput = container.querySelector<HTMLInputElement>('[data-ctrl="frames"]')!;
-  const frameSlider = container.querySelector<HTMLInputElement>('[data-ctrl="frame-slider"]')!;
-  const frameNumber = container.querySelector<HTMLInputElement>('[data-ctrl="frame-input"]')!;
   fpsInput.addEventListener("change", () => setTimelineValue("fps", parseFloat(fpsInput.value)));
   framesInput.addEventListener("change", () => setTimelineValue("frameCount", parseInt(framesInput.value, 10)));
-  frameSlider.addEventListener("input", () => setCurrentFrame(parseInt(frameSlider.value, 10)));
-  frameNumber.addEventListener("change", () => setCurrentFrame(parseInt(frameNumber.value, 10)));
 
-  container.querySelector<HTMLButtonElement>('[data-ctrl="toggle-autokey"]')!.addEventListener("click", toggleAutoKey);
-  container.querySelector<HTMLButtonElement>('[data-ctrl="key-selection"]')!.addEventListener("click", commitSelectionKey);
-  const playbackButton = container.querySelector<HTMLButtonElement>('[data-ctrl="playback-toggle"]')!;
-  playbackButton.addEventListener("click", togglePlayback);
-  const loopButton = container.querySelector<HTMLButtonElement>('[data-ctrl="loop-toggle"]')!;
-  loopButton.addEventListener("click", toggleLoopPlayback);
+  const autoKeyBtn = container.querySelector<HTMLButtonElement>('[data-ctrl="toggle-autokey"]')!;
+  const manualKeyBtn = container.querySelector<HTMLButtonElement>('[data-ctrl="key-selection"]')!;
+  autoKeyBtn.addEventListener("click", toggleAutoKey);
+  manualKeyBtn.addEventListener("click", commitSelectionKey);
 
   const easeSelect = container.querySelector<HTMLSelectElement>('[data-ctrl="ease-select"]')!;
   const easeApply = container.querySelector<HTMLButtonElement>('[data-ctrl="apply-ease"]')!;
@@ -2401,7 +2392,7 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
         const labelText = groupDef?.label || selection.id;
         selectionLabel.textContent = `Group: ${labelText}`;
       } else if (selection.kind === "rigRoot") {
-        selectionLabel.textContent = "Rig Root";
+        selectionLabel.textContent = "Master Joint";
       } else {
         selectionLabel.textContent = "Video Plane";
       }
@@ -2413,6 +2404,7 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
       groupScaleInputs.forEach((entry, groupId) => {
         entry.row.classList.toggle("active", selection?.kind === "group" && selection.id === groupId);
       });
+      manualKeyBtn.disabled = !selection || state.autoKey;
     },
     updateScaleFactor: (value: number | null) => {
       if (value == null) {
@@ -2426,9 +2418,6 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
     updateTimeline: () => {
       fpsInput.value = String(state.timeline.fps);
       framesInput.value = String(state.timeline.frameCount);
-      frameSlider.max = String(state.timeline.frameCount);
-      frameSlider.value = String(currentFrame);
-      frameNumber.value = String(currentFrame);
       const frameCount = state.timeline.frameCount;
       const shouldRefreshMarkers = timelineMarkersDirty || timelineMarkerFrameCount !== frameCount;
       if (shouldRefreshMarkers) {
@@ -2456,14 +2445,11 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
       refreshGroupScaleValues();
     },
     updateAutoKey: () => {
-      const btn = container.querySelector<HTMLButtonElement>('[data-ctrl="toggle-autokey"]')!;
-      btn.textContent = state.autoKey ? "Auto-Key On" : "Auto-Key Off";
-      btn.classList.toggle("active", state.autoKey);
+      autoKeyBtn.textContent = state.autoKey ? "Auto-Key On" : "Auto-Key Off";
+      autoKeyBtn.classList.toggle("active", state.autoKey);
+      manualKeyBtn.disabled = !selection || state.autoKey;
     },
     updatePlaybackControls: () => {
-      playbackButton.textContent = isPlaying ? "Pause" : "Play";
-      playbackButton.classList.toggle("active", isPlaying);
-      loopButton.classList.toggle("active", loopPlayback);
       timelineBar.setPlaybackState({ playing: isPlaying, loop: loopPlayback });
     },
     updateEaseControls: () => {
