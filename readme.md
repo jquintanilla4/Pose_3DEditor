@@ -4,12 +4,53 @@ A lightweight Vite + TypeScript + three.js playground for posing ViTPose-17 and 
 
 ## Getting Started
 
+### Frontend
+
 ```bash
-npm install
+npm install # only use during first time setup
 npm run dev
 ```
 
 The dev server prints a local URL (default http://localhost:5173). `npm run build` performs a type-check and production bundle.
+
+### Python Pose Backend
+
+The ViTPose/DWPose inference service lives under `server/` (FastAPI + Uvicorn). `npm run dev` spawns it automatically alongside Vite via `scripts/dev-server.mjs`, so you only have to manage the Python environment once.
+
+All of these commands should be executed inside the project folder (`Pose_3DEditor/`).
+
+**First-time setup** (only run once):
+
+```bash
+uv venv --python 3.11 .venv   # downloads Python 3.11 if needed and creates .venv at repo root
+source .venv/bin/activate
+uv pip install -r server/requirements.txt
+```
+
+`uv` dramatically speeds up virtualenv creation and dependency installs; install it from https://github.com/astral-sh/uv if you don't already have it. We recommend Python **3.11.x** because Torch/Transformers/MM* ship stable builds there; newer versions (3.12+) are not guaranteed. Prefer classic tooling? `python3.11 -m venv` + `pip install -r server/requirements.txt` works the same. If you want to launch the backend without Vite (for CI, etc.), run `npm run pyserver`.
+
+### Startup Commands
+
+If frontend install and backend install process have been executed (only once), you can now just run the following commands to continue development.
+
+```bash
+source .venv/bin/activate      # reuse the existing environment
+npm run dev                    # runs both Vite + uvicorn together
+```
+
+#### Auto-downloaded models
+
+- **ViTPose / RT-DETR (HF backend):** checkpoints + processors for `usyd-community/vitpose-base-simple`, `usyd-community/vitpose-plus-large` (dataset index 5 = COCO-WholeBody), the ONNX export from `JunkyByte/easy_ViTPose` (`onnx/wholebody/vitpose-l-wholebody.onnx`), and `PekingU/rtdetr_r50vd_coco_o365` are mirrored into `models/vitpose/` and `models/rtdetr/` automatically, so the Hugging Face cache isn’t required at runtime. You can override the locations with `VITPOSE_MODEL_DIR` / `RTDETR_MODEL_DIR` if desired.
+- **DWPose (MMPose backend):** the config + checkpoint land in `models/dwpose/` the first time you run that backend. Files come from the official IDEA-Research repositories (config via GitHub, checkpoint via Hugging Face). The resolved paths are exported as `DWPOSE_CFG` / `DWPOSE_CKPT` so power users can still override them if needed.
+
+Set `VITE_POSE_API` if you host the backend somewhere other than `http://localhost:8000`.
+
+### Pose Pipeline Workflow
+
+1. **Analyze** – pick a clip in the Pose Processing panel, choose backend/model/device/FPS/resize, tweak smoothing + 3D lifting, then click **Analyze**. Progress + a summary string will appear once the Python backend returns.
+2. **Insert / Replace** – after a successful analysis, inject the result at the playhead or replace the entire timeline. Joint keys are normalized to the rig bounds, optional 3D coordinates are respected, and the timeline auto-expands to fit.
+3. **Edit** – tweak poses, blend with existing animation, retime, etc.
+4. **Export** – use the Pose Export panel to stream the evaluated animation back to the backend, which renders the spectral skeleton look (black BG, glow joints/bones) to the requested MP4 path (default `exports/skeleton.mp4`).
 
 ## Current Feature Set
 
@@ -85,5 +126,3 @@ The dev server prints a local URL (default http://localhost:5173). `npm run buil
 - Timeline thumbnails for keyframe visualization
 - Batch export presets and rendering pipeline
 - Per-joint custom pivot points and IK solvers
-
-See `spec.md` for the complete project brief plus future requirements that haven’t landed yet.

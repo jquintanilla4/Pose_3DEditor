@@ -28,3 +28,21 @@ Thumbs.db
 .parcel-cache/
 .eslintcache
 .cache/
+
+# Python virtualenv / artifacts
+.venv/
+venv/
+env/
+__pycache__/
+.python-version
+.ruff_cache/
+.mypy_cache/
+/.uv/
+/models/
+
+#vscode
+.vscode
+
+# spec files
+spec.md
+pose_detection_spec.md

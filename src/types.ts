@@ -10,7 +10,7 @@ export type RigGroupDef = {
   label?: string;
 };
 
-export type RigProfileId = "vitpose_body_17" | "dwpose_body_25";
+export type RigProfileId = "vitpose_body_17" | "vitpose_wholebody_133" | "dwpose_body_25";
 
 export type RigProfile = {
   id: RigProfileId;

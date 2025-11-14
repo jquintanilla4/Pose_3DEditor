@@ -27,6 +27,9 @@ import {
   getGroupScaleTrack
 } from "./state";
 import type { RigProfile, RigProfileId, Vec3 } from "./types";
+import { processVideoPy, exportSkeletonVideo } from "./pose/serviceClient";
+import { applyPoseResultToState } from "./pose/importer";
+import type { PoseProcessResult, FrameKeypoints2D, VitPoseVariant } from "./pose/types";
 
 const APP_VERSION = "0.1.0";
 const DEPTH_BRUSH_SPEED = 0.01;
@@ -398,6 +401,8 @@ let timelineMarkersDirty = true;
 let timelineMarkerCache: number[] = [];
 let timelineMarkerFrameCount = -1;
 let ui: UIController;
+let poseVideoFile: File | null = null;
+let poseResult: PoseProcessResult | null = null;
 
 function markTimelineDirty() {
   timelineMarkersDirty = true;
@@ -440,6 +445,62 @@ function collectAllKeyframes(): number[] {
   addKeys(plane.timeOffset.keys);
   addKeys(plane.lockToCamera.keys);
   return Array.from(frames).sort((a, b) => a - b);
+}
+
+type PoseBounds = { cx: number; cy: number; halfX: number; halfY: number };
+
+function getRestBounds(): PoseBounds {
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  Object.values(state.restPose).forEach((joint) => {
+    minX = Math.min(minX, joint.x);
+    maxX = Math.max(maxX, joint.x);
+    minY = Math.min(minY, joint.y);
+    maxY = Math.max(maxY, joint.y);
+  });
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX) || minX === maxX) {
+    minX = -1;
+    maxX = 1;
+  }
+  if (!Number.isFinite(minY) || !Number.isFinite(maxY) || minY === maxY) {
+    minY = 0;
+    maxY = 2;
+  }
+  return {
+    cx: (minX + maxX) * 0.5,
+    cy: (minY + maxY) * 0.5,
+    halfX: Math.max(0.1, (maxX - minX) * 0.5),
+    halfY: Math.max(0.1, (maxY - minY) * 0.5)
+  };
+}
+
+function worldToNormalized(point: Vec3, bounds: PoseBounds) {
+  return {
+    x: (point.x - bounds.cx) / bounds.halfX,
+    y: (point.y - bounds.cy) / bounds.halfY,
+    c: 1
+  };
+}
+
+function buildExportFrames(): FrameKeypoints2D[] {
+  const bounds = getRestBounds();
+  const frames: FrameKeypoints2D[] = [];
+  const fpsValue = Math.max(1, state.timeline.fps);
+  for (let frame = 0; frame < state.timeline.frameCount; frame += 1) {
+    const { pose } = evaluatePose(frame);
+    const person: Record<string, { x: number; y: number; c: number }> = {};
+    Object.entries(pose).forEach(([jointId, vec]) => {
+      person[jointId] = worldToNormalized(vec, bounds);
+    });
+    frames.push({
+      frame,
+      time: frame / fpsValue,
+      persons: [person]
+    });
+  }
+  return frames;
 }
 
 function buildJointChildren(profile: RigProfile): Record<string, string[]> {
@@ -1997,6 +2058,76 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
         />
       </label>
     </section>
+    <section class="pose-processing-section">
+      <header>Pose Processing</header>
+      <label class="pose-file-input">
+        <span>Video Clip</span>
+        <input type="file" accept="video/*" data-ctrl="pose-video" />
+      </label>
+      <div class="field-row">
+        <label>Backend
+          <select data-ctrl="pose-backend">
+            <option value="hf">HF (ViTPose)</option>
+            <option value="mmpose">MMPose (DWPose)</option>
+          </select>
+        </label>
+        <label>Model
+          <select data-ctrl="pose-model">
+            <option value="vitpose">ViTPose</option>
+            <option value="dwpose">DWPose</option>
+          </select>
+        </label>
+      </div>
+      <div class="field-row pose-variant-row" data-ctrl="pose-variant-row">
+        <label>ViTPose Variant
+          <select data-ctrl="pose-vitpose-variant">
+            <option value="base-simple">Base (17 body joints)</option>
+            <option value="l-wholebody">L WholeBody</option>
+            <option value="l-wholebody-onnx">L WholeBody (ONNX)</option>
+          </select>
+        </label>
+      </div>
+      <div class="field-row">
+        <label>Device
+          <select data-ctrl="pose-device">
+            <option value="cpu">CPU</option>
+            <option value="cuda">CUDA</option>
+          </select>
+        </label>
+        <label>Person Mode
+          <select data-ctrl="pose-person">
+            <option value="single">Single</option>
+            <option value="multi">Multi</option>
+          </select>
+        </label>
+      </div>
+      <div class="field-row">
+        <label>Target FPS <input type="number" min="1" value="24" data-ctrl="pose-fps" /></label>
+        <label>Resize W <input type="number" min="0" placeholder="auto" data-ctrl="pose-resize-w" /></label>
+        <label>Resize H <input type="number" min="0" placeholder="auto" data-ctrl="pose-resize-h" /></label>
+      </div>
+      <div class="field-row">
+        <label>Smooth <input type="number" min="0" max="1" step="0.1" value="0.6" data-ctrl="pose-smooth" /></label>
+        <label class="pose-lift-toggle"><span>3D Lift</span><input type="checkbox" data-ctrl="pose-lift" checked /></label>
+      </div>
+      <div class="button-row pose-processing-actions">
+        <button data-ctrl="pose-analyze">Analyze</button>
+        <button data-ctrl="pose-insert" disabled>Insert @ Playhead</button>
+        <button data-ctrl="pose-replace" disabled>Replace Timeline</button>
+      </div>
+      <progress data-ctrl="pose-progress" max="1" hidden></progress>
+      <div class="pose-status" data-ctrl="pose-status">Select a clip and click Analyze.</div>
+    </section>
+    <section class="pose-export-section">
+      <header>Pose Export</header>
+      <label>Output Path
+        <input type="text" data-ctrl="pose-export-path" value="exports/skeleton.mp4" />
+      </label>
+      <div class="button-row">
+        <button data-ctrl="pose-export">Export Skeleton MP4</button>
+      </div>
+      <div class="pose-export-status" data-ctrl="pose-export-status"></div>
+    </section>
     <section>
       <header>Animation</header>
       <div class="button-row">
@@ -2212,6 +2343,216 @@ function buildPanel(container: HTMLElement, timelineBar: TimelineBarController):
     markTimelineDirty();
     ui.updateTimeline();
   });
+
+  const poseInsertBtn = container.querySelector<HTMLButtonElement>('[data-ctrl="pose-insert"]')!;
+  const poseReplaceBtn = container.querySelector<HTMLButtonElement>('[data-ctrl="pose-replace"]')!;
+  const poseProgress = container.querySelector<HTMLProgressElement>('[data-ctrl="pose-progress"]')!;
+  const poseStatus = container.querySelector<HTMLDivElement>('[data-ctrl="pose-status"]')!;
+  const updatePoseStatus = (message: string) => {
+    poseStatus.textContent = message;
+  };
+  poseProgress.max = 100;
+  poseProgress.value = 0;
+  poseProgress.hidden = true;
+  let poseProgressTimer: number | null = null;
+  const startPoseProgress = () => {
+    if (poseProgressTimer !== null) window.clearInterval(poseProgressTimer);
+    poseProgress.hidden = false;
+    poseProgress.value = 0;
+    poseProgressTimer = window.setInterval(() => {
+      const next = Math.min(95, poseProgress.value + Math.random() * 6 + 1);
+      poseProgress.value = next;
+    }, 400);
+  };
+  const stopPoseProgress = (success: boolean) => {
+    if (poseProgressTimer !== null) {
+      window.clearInterval(poseProgressTimer);
+      poseProgressTimer = null;
+    }
+    poseProgress.value = success ? 100 : 0;
+    window.setTimeout(() => {
+      poseProgress.hidden = true;
+      poseProgress.value = 0;
+    }, 600);
+  };
+  const poseVideoInput = container.querySelector<HTMLInputElement>('[data-ctrl="pose-video"]')!;
+  poseVideoInput.addEventListener("change", () => {
+    poseVideoFile = poseVideoInput.files?.[0] ?? null;
+    poseResult = null;
+    poseInsertBtn.disabled = true;
+    poseReplaceBtn.disabled = true;
+    if (poseVideoFile) {
+      updatePoseStatus(`Selected ${poseVideoFile.name}`);
+    } else {
+      updatePoseStatus("Select a clip and click Analyze.");
+    }
+  });
+  const poseBackend = container.querySelector<HTMLSelectElement>('[data-ctrl="pose-backend"]')!;
+  const poseModel = container.querySelector<HTMLSelectElement>('[data-ctrl="pose-model"]')!;
+  const poseVariantRow = container.querySelector<HTMLDivElement>('[data-ctrl="pose-variant-row"]')!;
+  const poseVitposeVariant = container.querySelector<HTMLSelectElement>('[data-ctrl="pose-vitpose-variant"]')!;
+  const poseDevice = container.querySelector<HTMLSelectElement>('[data-ctrl="pose-device"]')!;
+  const posePerson = container.querySelector<HTMLSelectElement>('[data-ctrl="pose-person"]')!;
+  const poseFps = container.querySelector<HTMLInputElement>('[data-ctrl="pose-fps"]')!;
+  const poseResizeW = container.querySelector<HTMLInputElement>('[data-ctrl="pose-resize-w"]')!;
+  const poseResizeH = container.querySelector<HTMLInputElement>('[data-ctrl="pose-resize-h"]')!;
+  const poseSmooth = container.querySelector<HTMLInputElement>('[data-ctrl="pose-smooth"]')!;
+  const poseLift = container.querySelector<HTMLInputElement>('[data-ctrl="pose-lift"]')!;
+  const poseAnalyzeBtn = container.querySelector<HTMLButtonElement>('[data-ctrl="pose-analyze"]')!;
+
+  const syncPoseVariantVisibility = () => {
+    const shouldShow = poseBackend.value === "hf" && poseModel.value === "vitpose";
+    poseVariantRow.style.display = shouldShow ? "" : "none";
+  };
+
+  const syncPoseModelOptions = () => {
+    const backend = poseBackend.value;
+    poseModel.querySelectorAll("option").forEach((opt) => {
+      const valid = (backend === "hf" && opt.value === "vitpose") || (backend === "mmpose" && opt.value === "dwpose");
+      opt.disabled = !valid;
+    });
+    if (backend === "hf") {
+      poseModel.value = "vitpose";
+    } else if (backend === "mmpose") {
+      poseModel.value = "dwpose";
+    }
+    syncPoseVariantVisibility();
+  };
+  poseBackend.addEventListener("change", syncPoseModelOptions);
+  poseModel.addEventListener("change", syncPoseVariantVisibility);
+  syncPoseModelOptions();
+
+  const setPoseBusy = (busy: boolean) => {
+    poseAnalyzeBtn.disabled = busy;
+    if (busy) {
+      startPoseProgress();
+    } else {
+      stopPoseProgress(Boolean(poseResult));
+    }
+    poseInsertBtn.disabled = busy || !poseResult;
+    poseReplaceBtn.disabled = busy || !poseResult;
+  };
+
+  const summarizePoseResult = (result: PoseProcessResult) => {
+    const frames = result.kpts2d.length;
+    const fpsValue = result.meta.effectiveFps.toFixed(2);
+    const has3d = result.kpts3d && result.kpts3d.length > 0;
+    return `${frames} frames @ ${fpsValue} fps • ${result.meta.model.toUpperCase()} via ${poseBackend.value.toUpperCase()} • 3D ${
+      has3d ? "yes" : "no"
+    }`;
+  };
+
+  const handlePoseAnalyze = async () => {
+    if (!poseVideoFile) {
+      updatePoseStatus("Choose a video clip first.");
+      return;
+    }
+    setPoseBusy(true);
+    updatePoseStatus("Analyzing… this can take a minute for longer clips.");
+    try {
+      const resizeWidth = parseInt(poseResizeW.value, 10);
+      const resizeHeight = parseInt(poseResizeH.value, 10);
+      const options = {
+        backend: poseBackend.value as "hf" | "mmpose",
+        model: poseModel.value as "vitpose" | "dwpose",
+        vitposeVariant: poseVitposeVariant.value as VitPoseVariant,
+        device: poseDevice.value as "cpu" | "cuda",
+        fps: parseInt(poseFps.value, 10) || 24,
+        resizeWidth: Number.isFinite(resizeWidth) && resizeWidth > 0 ? resizeWidth : undefined,
+        resizeHeight: Number.isFinite(resizeHeight) && resizeHeight > 0 ? resizeHeight : undefined,
+        personMode: posePerson.value as "single" | "multi",
+        smoothStrength: parseFloat(poseSmooth.value) || 0.6,
+        lift3D: poseLift.checked
+      };
+      const result = await processVideoPy(poseVideoFile, options);
+      poseResult = result;
+      poseInsertBtn.disabled = false;
+      poseReplaceBtn.disabled = false;
+      updatePoseStatus(`Done: ${summarizePoseResult(result)}`);
+    } catch (error) {
+      console.error(error);
+      updatePoseStatus(error instanceof Error ? error.message : "Pose processing failed.");
+      poseResult = null;
+    } finally {
+      setPoseBusy(false);
+    }
+  };
+
+  poseAnalyzeBtn.addEventListener("click", handlePoseAnalyze);
+
+  const insertPoseFrames = (clearExisting: boolean, start: number) => {
+    if (!poseResult) {
+      updatePoseStatus("Run Analyze first.");
+      return;
+    }
+    const targetProfile = poseResult.meta.bodyProfile as RigProfileId;
+    if (state.rigProfileId !== targetProfile) {
+      const targetLabel = getProfile(targetProfile).label;
+      let shouldSwitch = clearExisting;
+      if (!shouldSwitch) {
+        shouldSwitch = window.confirm(
+          `${targetLabel} rig is required for this result. Switching rigs will reset existing animation. Continue?`
+        );
+      }
+      if (!shouldSwitch) {
+        updatePoseStatus(`Switch to ${targetLabel} rig before inserting.`);
+        return;
+      }
+      switchProfile(targetProfile);
+      fillProfiles();
+      ui.showStatus(`Switched rig to ${targetLabel}`);
+    }
+    const stats = applyPoseResultToState(state, poseResult, {
+      startFrame: start,
+      use3D: poseLift.checked,
+      clearExisting,
+      autoFitTimeline: true
+    });
+    markTimelineDirty();
+    ui.updateTimeline();
+    requestPoseUpdate();
+    ui.showStatus(`Applied ${stats.framesApplied} frames to timeline.`);
+    updatePoseStatus(`Ready: ${summarizePoseResult(poseResult)}`);
+  };
+
+  poseInsertBtn.addEventListener("click", () => insertPoseFrames(false, currentFrame));
+  poseReplaceBtn.addEventListener("click", () => insertPoseFrames(true, 0));
+
+  const poseExportPath = container.querySelector<HTMLInputElement>('[data-ctrl="pose-export-path"]')!;
+  const poseExportBtn = container.querySelector<HTMLButtonElement>('[data-ctrl="pose-export"]')!;
+  const poseExportStatus = container.querySelector<HTMLDivElement>('[data-ctrl="pose-export-status"]')!;
+
+  const handleExport = async () => {
+    poseExportBtn.disabled = true;
+    poseExportStatus.textContent = "Exporting...";
+    try {
+      const frames = buildExportFrames();
+      if (!frames.length) {
+        poseExportStatus.textContent = "No frames to export.";
+        poseExportBtn.disabled = false;
+        return;
+      }
+      const payload = {
+        width: state.output.width,
+        height: state.output.height,
+        fps: state.timeline.fps,
+        bones: state.rigDef.bones.map(([a, b]) => [a, b]),
+        frames,
+        outPath: poseExportPath.value || "exports/skeleton.mp4",
+        skeletonOnly: true
+      };
+      const response = await exportSkeletonVideo(payload);
+      poseExportStatus.textContent = `Saved to ${response.path}`;
+      ui.showStatus("Skeleton MP4 exported.");
+    } catch (error) {
+      console.error(error);
+      poseExportStatus.textContent = error instanceof Error ? error.message : "Export failed.";
+    } finally {
+      poseExportBtn.disabled = false;
+    }
+  };
+
+  poseExportBtn.addEventListener("click", handleExport);
 
   const cameraFovInput = container.querySelector<HTMLInputElement>('[data-ctrl="camera-fov"]')!;
   cameraFovInput.addEventListener("change", () => {
