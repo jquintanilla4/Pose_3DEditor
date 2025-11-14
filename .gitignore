@@ -46,4 +46,6 @@ __pycache__/
 # spec files
 spec.md
 pose_detection_spec.md
+
+# agent files
 agents.md
